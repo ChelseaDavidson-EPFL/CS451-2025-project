@@ -50,7 +50,7 @@ private:
 
     void initBroadcaster();
     void initReceiver();
-    void sendMessageLoop(std::string pendingMessageId);
+    void sendMessageLoop();
     void sendRaw(const std::string& payload, in_addr_t ip, unsigned short port);
     void receiverLoop();
     void sendAck(in_addr_t destIp, unsigned short destPort, const std::string& msgId);

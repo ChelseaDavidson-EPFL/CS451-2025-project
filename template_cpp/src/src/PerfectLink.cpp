@@ -105,33 +105,42 @@ void PerfectLink::sendMessage(const std::string& message) {
     seqNumber_ += 1;
     std::string id = std::to_string(seqNumber_);
     mapMutex.lock();
+    //TODO - add check it isn't already in pending
     pending_[id] = Message({id, message}); // TODO - add handling for 0 time
     mapMutex.unlock();
     std::string payload = id + "|" + message;
 
     // Start resend thread if not already running
     if (!resendThread_.joinable()) {
-        resendThread_ = std::thread(&PerfectLink::sendMessageLoop, this, id);
+        resendThread_ = std::thread(&PerfectLink::sendMessageLoop, this);
     }
-
-    // Send first copy immediately
-    sendRaw(payload, receiverIp_, receiverPort_);
-    std::cout << "⟨pl, Send | q=" << receiverId_ << ", m=\"" << message << "\"⟩" << std::endl;
-    logSend(message);
 }
 
-void PerfectLink::sendMessageLoop(std::string pendingMessageId) {
+void PerfectLink::sendMessageLoop() {
     while (running_) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        // std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
+        Message message;
+        bool hasFound = false; // To check if we have a message to send
         mapMutex.lock();
-        auto it = pending_.find(pendingMessageId);
-        if (it == pending_.end()) break; // Don't need to send this message anymore or it was never in our pending list (no creation)
-        std::string payload = pendingMessageId + "|" + it->second.message;
+        for (const auto &pair: pending_) { // Only find first message that is ready to send
+            if (clock() - pair.second.lastSentTime > CLOCKS_PER_SEC/4){ // every 250ms
+                message = pair.second;
+                hasFound = true;
+                break;
+            } 
+        }
         mapMutex.unlock();
 
+        if (!hasFound) { // Messages were sent too recently - nothing to do
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            continue; 
+        }
+
+        std::string payload = message.id + "|" + message.message;
+
         sendRaw(payload, receiverIp_, receiverPort_);
-        std::cout << "Resending message: " << it->second.message << std::endl;
+        std::cout << "Resending message: " << message.message << std::endl;
     }
 }
 
@@ -174,6 +183,7 @@ void PerfectLink::receiverLoop() {
                 continue;
             }
             pending_.erase(msgId);
+            logSend(it->second.message);
             std::cout << "Received ACK for message id: " << msgId << std::endl;
             std::cout << "Size of pending_ now " << pending_.size() << std::endl;
             mapMutex.unlock();     
