@@ -127,6 +127,38 @@ public:
     return configPath_.c_str();
   }
 
+  std::pair<unsigned int, unsigned long> configDetails() {
+    std::ifstream configFile(configPath());
+    
+    if (!configFile.is_open()) {
+      std::ostringstream os;
+      os << "`" << configPath() << "` does not exist.";
+      throw std::invalid_argument(os.str());
+    }
+
+    std::string line;
+    if (!std::getline(configFile, line) || line.empty()) {
+      std::ostringstream os;
+      os << "`" << configPath() << "` does not contain configuration in first line.";
+      throw std::invalid_argument(os.str());
+    }
+  
+    std::istringstream iss(line); // treating text as a stream
+    trim(line);
+
+    unsigned int numMessages;
+    unsigned long receiverId;
+
+    if (!(iss >> numMessages >> receiverId)) {
+      std::ostringstream os;
+      os << "Parsing for `" << configPath() << "` failed.";
+      throw std::invalid_argument(os.str());
+    }
+
+    std::pair<unsigned int, unsigned long> result(numMessages, receiverId);
+    return result;
+  }
+
   std::vector<Host> hosts() {
     std::ifstream hostsFile(hostsPath());
     std::vector<Host> hosts;
