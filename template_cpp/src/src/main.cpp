@@ -13,6 +13,8 @@ static void stop(int) {
   signal(SIGTERM, SIG_DFL);
   signal(SIGINT, SIG_DFL);
 
+  std::cout << "Received terminating signal" << std::endl;
+
   // immediately stop network packet processing
   std::cout << "Immediately stopping network packet processing.\n";
   // TODO

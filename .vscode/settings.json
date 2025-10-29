@@ -67,6 +67,8 @@
         "filesystem": "cpp",
         "map": "cpp",
         "xtree": "cpp",
-        "mutex": "cpp"
+        "mutex": "cpp",
+        "deque": "cpp",
+        "queue": "cpp"
     }
 }

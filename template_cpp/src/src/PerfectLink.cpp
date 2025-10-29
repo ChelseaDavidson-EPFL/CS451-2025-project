@@ -113,34 +113,37 @@ void PerfectLink::sendMessage(const std::string& message) {
     // Start resend thread if not already running
     if (!resendThread_.joinable()) {
         resendThread_ = std::thread(&PerfectLink::sendMessageLoop, this);
+        std::cout << "Starting sending thread" << std::endl;
     }
+    logSend(message);
 }
 
 void PerfectLink::sendMessageLoop() {
     while (running_) {
+        // std::cout << "In send message loop" << std::endl;
         // std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
         Message message;
         bool hasFound = false; // To check if we have a message to send
         mapMutex.lock();
+
         for (const auto &pair: pending_) { // Only find first message that is ready to send
-            if (clock() - pair.second.lastSentTime > CLOCKS_PER_SEC/4){ // every 250ms
+            if (clock() - pair.second.lastSentTime > CLOCKS_PER_SEC/100){ // every 10ms
                 message = pair.second;
                 hasFound = true;
+                pending_[message.id] = Message({message.id, message.message, clock()}); // Update last sent time of message we're about to send
                 break;
             } 
         }
         mapMutex.unlock();
 
         if (!hasFound) { // Messages were sent too recently - nothing to do
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
             continue; 
         }
-
         std::string payload = message.id + "|" + message.message;
-
         sendRaw(payload, receiverIp_, receiverPort_);
-        std::cout << "Resending message: " << message.message << std::endl;
+        std::cout << "Sending message: " << message.message << std::endl;
     }
 }
 
@@ -183,7 +186,6 @@ void PerfectLink::receiverLoop() {
                 continue;
             }
             pending_.erase(msgId);
-            logSend(it->second.message);
             std::cout << "Received ACK for message id: " << msgId << std::endl;
             std::cout << "Size of pending_ now " << pending_.size() << std::endl;
             mapMutex.unlock();     
