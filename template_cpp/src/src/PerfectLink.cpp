@@ -205,88 +205,22 @@ void PerfectLink::receiverLoop() {
         unsigned short senderPort = ntohs(senderAddr.sin_port);
         unsigned long senderId = hostMapByPort_[senderPort].first;
         unsigned long seqNbr = std::stoul(idStr);
-         std::cout << "Just received (ProcessID, seqNbrID): " << senderId << ", " << seqNbr << std::endl;
+        std::cout << "Just received (ProcessID, seqNbrID): " << senderId << ", " << seqNbr << std::endl;
 
 
         // Check if already delivered:
         auto& deliveredList = delivered_[senderId]; // TODO - do I need a mutex lock here?
-        auto& pendingList = pendingDelivery_[senderId];
+        auto it = deliveredList.find(idStr);
 
-        bool alreadyDelivered = false;
-        if (!deliveredList.empty()) {
-            if (seqNbr <= deliveredList.front().first) {
-                alreadyDelivered = true;
-            } else {
-                // Not older than the front; still might be present somewhere in the list.
-                // We check the list only if necessary.
-                alreadyDelivered = std::any_of(deliveredList.begin(), deliveredList.end(),
-                                            [&](const auto& p) { return p.first == seqNbr; });
-            }
-        }
-
-        if (alreadyDelivered) {
-            // See if we can clean:
-            if (deliveredList.size() > 1) {
-                deliveredList.pop_front();
-            }
-            std::cout << "Cleaning delivered because message sent was already delivered: " << std::endl;
-            printDelivered(); 
+        if (it != deliveredList.end()) { // Already in our list
+            sendAck(senderAddr.sin_addr.s_addr, senderPort, idStr); // Send ack again in case they didn't receive it
             continue;
-        }
-
-        // Find the last delivered sequence number (0 if none)
-        unsigned long lastDeliveredId = deliveredList.empty() ? 0 : deliveredList.back().first;
-
-        unsigned int deliveredCount = 0; // track how many we deliver this round
-
-        // CASE 1: This message is the next in sequence and can therefore deliver it
-        if (seqNbr == lastDeliveredId + 1) {
-            deliveredList.emplace_back(seqNbr, message);
-            deliveredCount++;
-
-            std::cout << "Deliver | p=" << senderId << ", m=\"" << message << "\"⟩\n";
+        } else { // Not in our list so add and deliver it
+            deliveredList.insert(idStr);
             if (deliverCallback_) deliverCallback_(senderId, message);
-
-            // Try to deliver pending messages that can now be delivered in order
-            bool deliveredNew = true;
-            while (deliveredNew && !pendingList.empty()) {
-                deliveredNew = false;
-                for (auto it = pendingList.begin(); it != pendingList.end();) {
-                    if (it->first == deliveredList.back().first + 1) {
-                        deliveredList.push_back(*it);
-                        deliveredCount++;
-                        if (deliverCallback_) deliverCallback_(senderId, it->second);
-                        std::cout << "From pending: Deliver | p=" << senderId << ", m=\"" << it->second << "\"⟩\n";
-                        it = pendingList.erase(it);
-                        deliveredNew = true;
-                    } else {
-                        ++it;
-                    }
-                }
-            }
-        }
-        // CASE 2: Out of order so store it in pendingDelivery_
-        else {
-            // Insert message in order
-            std::cout << "Added '" << message << "' from process " << senderId << " to pending list" << std::endl;
-            auto pos = std::find_if(pendingList.begin(), pendingList.end(),
-                                    [&](const auto& p) { return seqNbr < p.first; });
-            pendingList.insert(pos, {seqNbr, message});
-            printPendingDelivery();
-        }
-
-        // Clean delivered list - remove as many as we added
-        if (deliveredList.size() > 1) {
-            std::cout << "Cleaning delivered because we just delivered stuff: " << std::endl;
-
-            for (unsigned int i = 0; i < deliveredCount && deliveredList.size() > 1; ++i) {
-                deliveredList.pop_front();
-            }
+            sendAck(senderAddr.sin_addr.s_addr, senderPort, idStr);
         }
         printDelivered();
-
-        // Send ACK regardless of delivery status
-        sendAck(senderAddr.sin_addr.s_addr, senderPort, idStr);
     }
 }
 
@@ -330,19 +264,8 @@ void PerfectLink::printDelivered() const {
     std::cout << "\n===== Delivered Messages =====\n";
     for (const auto& [senderId, messages] : delivered_) {
         std::cout << "From process " << senderId << ":\n";
-        for (const auto& [msgId, msg] : messages) {
-            std::cout << "  ID " << msgId << " → " << msg << '\n';
-        }
-    }
-    std::cout << "==============================\n";
-}
-
-void PerfectLink::printPendingDelivery() const {
-    std::cout << "\n===== Pending Delivery Messages =====\n";
-    for (const auto& [senderId, messages] : pendingDelivery_) {
-        std::cout << "From process " << senderId << ":\n";
-        for (const auto& [msgId, msg] : messages) {
-            std::cout << "  ID " << msgId << " → " << msg << '\n';
+        for (const auto& msgId : messages) {
+            std::cout << "  ID " << msgId << '\n';
         }
     }
     std::cout << "==============================\n";

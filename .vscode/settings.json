@@ -69,6 +69,7 @@
         "xtree": "cpp",
         "mutex": "cpp",
         "deque": "cpp",
-        "queue": "cpp"
+        "queue": "cpp",
+        "set": "cpp"
     }
 }

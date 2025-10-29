@@ -9,6 +9,7 @@
 #include <list>
 #include <mutex>
 #include <ctime>
+#include <set>
 
 class PerfectLink {
 public:
@@ -39,14 +40,19 @@ private:
         clock_t lastSentTime = 0;
     };
 
+    struct CompareNumericStrings {
+        bool operator()(const std::string& a, const std::string& b) const {
+            return std::stoi(a) < std::stoi(b);
+        }
+    };
+
     std::unordered_map<std::string, Message> pending_;
 
     std::mutex mapMutex;
 
     int seqNumber_;
     std::function<void(unsigned long, const std::string&)> deliverCallback_;
-    std::map<unsigned long, std::list<std::pair<unsigned long, std::string>>> delivered_; // Outer key: processId, Inner pair: message sequence number (id), message content
-    std::map<unsigned long, std::list<std::pair<unsigned long, std::string>>> pendingDelivery_; 
+    std::map<unsigned long, std::set<std::string, CompareNumericStrings>> delivered_; // Outer key: processId, Inner pair: message sequence number (id), message content
 
     void initBroadcaster();
     void initReceiver();
@@ -58,8 +64,5 @@ private:
     void logSend(const std::string& message);
     void stop();
     void printDelivered() const;
-    void printPendingDelivery() const;
-
-
 
 };
