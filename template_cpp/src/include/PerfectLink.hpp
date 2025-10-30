@@ -53,6 +53,7 @@ private:
     int seqNumber_;
     std::function<void(unsigned long, const std::string&)> deliverCallback_;
     std::map<unsigned long, std::set<std::string, CompareNumericStrings>> delivered_; // Outer key: processId, Inner pair: message sequence number (id), message content
+    std::map<unsigned long, std::string> firstMissingMessage_; // Outer key: processId, Inner value: firstMissingMessage_
 
     void initBroadcaster();
     void initReceiver();

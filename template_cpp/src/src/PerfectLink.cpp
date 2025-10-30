@@ -92,11 +92,23 @@ void PerfectLink::initReceiver() {
         close(sockfd_);
     }
 
+    // Initialise the map storing the last missing message ID for each broadcaster process:
+    for (const auto& [port, pairVal] : hostMapByPort_) {
+        unsigned long processId = pairVal.first;
+
+        // Skip the receiver’s own process
+        if (port == receiverPort_)
+            continue;
+
+        // Initialize first missing message to "1"
+        firstMissingMessage_[processId] = "1";
+    }
+
     running_ = true;
     receiverThread_ = std::thread(&PerfectLink::receiverLoop, this);
 
     std::cout << "Listening on port " << receiverPort_ << "...\n";
-  std::cout << "Initialised " << processId_ << " as a receiver \n";
+    std::cout << "Initialised " << processId_ << " as a receiver \n";
 
 }
 
@@ -204,23 +216,73 @@ void PerfectLink::receiverLoop() {
         std::string message = payload.substr(sep + 1);
         unsigned short senderPort = ntohs(senderAddr.sin_port);
         unsigned long senderId = hostMapByPort_[senderPort].first;
-        unsigned long seqNbr = std::stoul(idStr);
-        std::cout << "Just received (ProcessID, seqNbrID): " << senderId << ", " << seqNbr << std::endl;
+        std::string& firstMissingMessage = firstMissingMessage_[senderId];
+        std::cout << "Just received (ProcessID, idStr): " << senderId << ", " << idStr << std::endl;
 
-
+        std::cout<<"Delivered at start of receive process";
+        printDelivered();
+        std::cout << "First missing message at start is: " << firstMissingMessage << std::endl;
         // Check if already delivered:
-        auto& deliveredList = delivered_[senderId]; // TODO - do I need a mutex lock here?
-        auto it = deliveredList.find(idStr);
-
-        if (it != deliveredList.end()) { // Already in our list
+        if (std::stoi(idStr) < std::stoi(firstMissingMessage)) { // Already delivered it but it has been cleaned from delivered_
             sendAck(senderAddr.sin_addr.s_addr, senderPort, idStr); // Send ack again in case they didn't receive it
+            std::cout << "Already delivered " << idStr << " from " << senderId << " so skipping" << std::endl;
             continue;
-        } else { // Not in our list so add and deliver it
-            deliveredList.insert(idStr);
+        }
+        
+        // Find delivered list for this processId
+        auto& deliveredSet = delivered_[senderId]; // TODO - do I need a mutex lock here?
+    
+
+        if (std::stoi(idStr) == std::stoi(firstMissingMessage)) { // The one we've been waiting for so deliver it
+            std::cout << "Just received firstMissingMessage so cleaning delivered" << std::endl;
+            deliveredSet.insert(idStr);
             if (deliverCallback_) deliverCallback_(senderId, message);
             sendAck(senderAddr.sin_addr.s_addr, senderPort, idStr);
+
+            // TODO -> now replace the firstMissingMessage and clean deliveredSet
+            std::string prev = "0";
+            bool gapFound = false;
+            std::string lastValue = *deliveredSet.rbegin();
+            for (std::string msgId : deliveredSet) {
+                if (prev == "0") { // At the first value so skip
+                    prev = msgId;
+                } else { // Not at the first value
+                    if (std::stoi(prev) + 1 != std::stoi(msgId)) { // Found the gap
+                        std::cout << "Found the gap so removing up to gap" << std::endl;
+                        deliveredSet.erase(prev);
+                        firstMissingMessage = std::to_string(std::stoi(prev) + 1);
+                        gapFound = true;
+                        break;
+                    } else { // Haven't found the gap but can keep cleaning
+                        deliveredSet.erase(prev);
+                        prev = msgId;
+                    }
+                }
+            }
+            if (!gapFound) {
+                // No gap found: all are in order
+                std::cout << "Didn't find gap so removing whole list" << std::endl;
+                firstMissingMessage = std::to_string(std::stoi(lastValue) + 1);
+                deliveredSet.clear();
+            }
+
+        } else { // Either in our delivered set or never been delivered
+            auto it = deliveredSet.find(idStr);
+
+            if (it != deliveredSet.end()) { // Already in our list
+                std::cout << "Message was in delivered list" << std::endl;
+                sendAck(senderAddr.sin_addr.s_addr, senderPort, idStr); // Send ack again in case they didn't receive it
+                continue;
+            } else { // Not in our list so add and deliver it
+                std::cout << "Message not in delivered list and wasn't one we were waiting for so we're delivering it and adding it to our list" << std::endl;
+                deliveredSet.insert(idStr);
+                if (deliverCallback_) deliverCallback_(senderId, message);
+                sendAck(senderAddr.sin_addr.s_addr, senderPort, idStr);
+            }
         }
+        std::cout << "Delivered list at end off the receiver processing" << std::endl;
         printDelivered();
+        std::cout << "firstMissing at end of the receiver processing: " << firstMissingMessage_[senderId];
     }
 }
 
