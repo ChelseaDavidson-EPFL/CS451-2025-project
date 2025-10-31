@@ -3,6 +3,9 @@
 #include <fstream>
 #include <sys/stat.h>  // for mkdir
 #include <string>
+#include <cerrno>
+#include <cstring>
+#include <sys/time.h> // for struct timeval
 
 #include "PerfectLink.hpp"
 
@@ -46,7 +49,7 @@ PerfectLink::~PerfectLink() {
 
 void PerfectLink::initBroadcaster() {
     sockfd_ = socket(AF_INET, SOCK_DGRAM, 0);
-    if (sockfd_ < 0) { perror("socket");}
+    if (sockfd_ < 0) { perror("socket"); }
 
     // Allow address reuse
     int optval = 1;
@@ -55,12 +58,21 @@ void PerfectLink::initBroadcaster() {
     // Set up local address to bind to
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    addr.sin_port = htons(processPort_);        
+    addr.sin_port = htons(processPort_);
     addr.sin_addr.s_addr = processIp_;
 
     if (bind(sockfd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
         perror("bind (sender)");
         close(sockfd_);
+    }
+
+    // Set a receive timeout so recvfrom() won't block indefinitely.
+    // Adjust the timeout as needed (here 100 ms).
+    struct timeval tv;
+    tv.tv_sec = 0;
+    tv.tv_usec = 100000; // 100 ms
+    if (setsockopt(sockfd_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0) {
+        perror("setsockopt SO_RCVTIMEO");
     }
 
     running_ = true;
@@ -83,13 +95,21 @@ void PerfectLink::initReceiver() {
     // Set up local address to bind to
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    addr.sin_port = htons(receiverPort_);        
+    addr.sin_port = htons(receiverPort_);
     addr.sin_addr.s_addr = receiverIp_;
 
     // Bind the socket
     if (bind(sockfd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
         perror("bind");
         close(sockfd_);
+    }
+
+    // Set a receive timeout so recvfrom() won't block indefinitely.
+    struct timeval tv;
+    tv.tv_sec = 0;
+    tv.tv_usec = 100000; // 100 ms
+    if (setsockopt(sockfd_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0) {
+        perror("setsockopt SO_RCVTIMEO");
     }
 
     // Initialise the map storing the last missing message ID for each broadcaster process:
@@ -109,7 +129,6 @@ void PerfectLink::initReceiver() {
 
     std::cout << "Listening on port " << receiverPort_ << "...\n";
     std::cout << "Initialised " << processId_ << " as a receiver \n";
-
 }
 
 void PerfectLink::sendMessage(const std::string& message) {
@@ -134,28 +153,39 @@ void PerfectLink::sendMessageLoop() {
     while (running_) {
         // std::cout << "In send message loop" << std::endl;
         // std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        std::this_thread::sleep_for(std::chrono::milliseconds(5)); // baseline pacing
 
-        Message message;
+        auto now = Clock::now();
         bool hasFound = false; // To check if we have a message to send
-        mapMutex.lock();
+        Message msgToSend; 
+        std::unique_lock<std::mutex> lock(mapMutex);
 
-        for (const auto &pair: pending_) { // Only find first message that is ready to send
-            if (clock() - pair.second.lastSentTime > CLOCKS_PER_SEC/100){ // every 10ms
-                message = pair.second;
+        for (auto& [id, msg] : pending_) {
+            if (now - msg.lastSentTime > std::chrono::milliseconds(200)) {
+                std::cout << "Found message to send" << std::endl;
+                msgToSend = msg;
+                msg.lastSentTime = now;
                 hasFound = true;
-                pending_[message.id] = Message({message.id, message.message, clock()}); // Update last sent time of message we're about to send
                 break;
-            } 
+            }
         }
-        mapMutex.unlock();
+        lock.unlock();
 
         if (!hasFound) { // Messages were sent too recently - nothing to do
+            std::cout << "Messages were sent too recently - waiting 10ms" << std::endl;
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
             continue; 
         }
-        std::string payload = message.id + "|" + message.message;
+
+        std::string payload = msgToSend.id + "|" + msgToSend.message;
+        std::cout << "Sending message: " << msgToSend.message << std::endl;
         sendRaw(payload, receiverIp_, receiverPort_);
-        std::cout << "Sending message: " << message.message << std::endl;
+
+        // If backlog grows, sleep longer to avoid flooding
+        if (pending_.size() > 100) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            std::cout << "Num messages to send too big - waiting 100ms" << std::endl;
+        }
     }
 }
 
@@ -180,9 +210,26 @@ void PerfectLink::receiverLoop() {
 
     while (running_) {
         std::cout << "listening..." << std::endl;
+
         ssize_t bytes = recvfrom(sockfd_, buffer, sizeof(buffer)-1, 0,
                     reinterpret_cast<sockaddr*>(&senderAddr), &senderLen);
-        if (bytes <= 0) continue;
+
+        if (bytes < 0) {
+            // handle non-fatal errors (timeout / interrupt) by continuing the loop
+            if (errno == EAGAIN || errno == EINTR) {
+                // no data this iteration or interrupted, continue to let other activity proceed
+                continue;
+            } else {
+                // real socket error
+                perror("recvfrom");
+                continue;
+            }
+        }
+
+        if (bytes == 0) {
+            // no data, continue
+            continue;
+        }
 
         buffer[bytes] = '\0';
         std::string payload(buffer);
@@ -190,17 +237,7 @@ void PerfectLink::receiverLoop() {
         // Extract message type
         if (payload.rfind("ACK:", 0) == 0) {
             std::string msgId = payload.substr(4);
-
-            mapMutex.lock();
-            auto it = pending_.find(msgId);
-            if (it == pending_.end()) { // Message Id not in our list TODO - could this throw an error when it might not be an error?
-                perror("Received ACK for message that was not pending");
-                continue;
-            }
-            pending_.erase(msgId);
-            std::cout << "Received ACK for message id: " << msgId << std::endl;
-            std::cout << "Size of pending_ now " << pending_.size() << std::endl;
-            mapMutex.unlock();     
+            handleAck(msgId);
             continue;
         }
 
@@ -210,7 +247,7 @@ void PerfectLink::receiverLoop() {
             perror("incorrect payload format");
             continue;
         }
-        
+
         // Get message info
         std::string idStr = payload.substr(0, sep);
         std::string message = payload.substr(sep + 1);
@@ -282,13 +319,21 @@ void PerfectLink::receiverLoop() {
         }
         std::cout << "Delivered list at end off the receiver processing" << std::endl;
         printDelivered();
-        std::cout << "firstMissing at end of the receiver processing: " << firstMissingMessage_[senderId];
+        std::cout << "firstMissing at end of the receiver processing: " << firstMissingMessage_[senderId] << std::endl;
     }
 }
 
 void PerfectLink::sendAck(in_addr_t destIp, unsigned short destPort, const std::string& msgId) {
     std::string ack = "ACK:" + msgId;
     sendRaw(ack, destIp, destPort);
+}
+
+void PerfectLink::handleAck(const std::string& msgId) {
+    std::lock_guard<std::mutex> lock(mapMutex);
+    auto it = pending_.find(msgId);
+    if (it != pending_.end()) {
+        pending_.erase(it);
+    }
 }
 
 void PerfectLink::logDelivery(unsigned long senderId, const std::string& message) {

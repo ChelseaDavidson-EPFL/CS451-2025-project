@@ -34,10 +34,12 @@ private:
     std::thread receiverThread_;
     std::thread resendThread_;
 
+    using Clock = std::chrono::steady_clock;
+
       struct Message {
         std::string id;
         std::string message;
-        clock_t lastSentTime = 0;
+        Clock::time_point lastSentTime = Clock::now();
     };
 
     struct CompareNumericStrings {
@@ -61,6 +63,7 @@ private:
     void sendRaw(const std::string& payload, in_addr_t ip, unsigned short port);
     void receiverLoop();
     void sendAck(in_addr_t destIp, unsigned short destPort, const std::string& msgId);
+    void handleAck(const std::string& msgId);
     void logDelivery(unsigned long senderId, const std::string& message);
     void logSend(const std::string& message);
     void stop();
