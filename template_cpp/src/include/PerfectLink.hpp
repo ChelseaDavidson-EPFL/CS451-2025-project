@@ -18,6 +18,7 @@ public:
     ~PerfectLink();
 
     void sendMessage(const std::string& message);
+    void flushMessages();
 
 private:
     unsigned long processId_;
@@ -36,29 +37,32 @@ private:
 
     using Clock = std::chrono::steady_clock;
 
-      struct Message {
+      struct Packet {
         unsigned long id;
-        std::string message;
+        std::string messages;
         Clock::time_point lastSentTime = Clock::now() - std::chrono::milliseconds(200); // So that it sends the message immediately in sendMessageLoop
     };
 
-    std::unordered_map<unsigned long, Message> pending_;
+    std::string partialPacket_;
+    unsigned long maxPacketSize_ = 1000; // Recommend 1500 bytes packet size - left room for elements at the front
+    std::unordered_map<unsigned long, Packet> pending_;
 
     std::mutex pendingMapMutex;
 
     unsigned long seqNumber_;
     std::function<void(unsigned long, const std::string&)> deliverCallback_;
     std::map<unsigned long, std::set<unsigned long>> delivered_; // Outer key: processId, Inner pair: message sequence number (id), message content
-    std::map<unsigned long, unsigned long> firstMissingMessageId_; // Outer key: processId, Inner value: firstMissingMessage_
+    std::map<unsigned long, unsigned long> firstMissingPacketId_; // Outer key: processId, Inner value: firstMissingMessage_
 
     void initBroadcaster();
     void initReceiver();
-    void addMessageToPending(Message message);
-    void sendMessageLoop();
-    Message* findMessageToSend();
+    void addFinishedPacketToPending();
+    void sendPacketLoop();
+    bool findPacketToSend(Packet& packet);
     void sendRaw(const std::string& payload, in_addr_t ip, unsigned short port);
     void receiverLoop();
-    void sendAck(in_addr_t destIp, unsigned short destPort, unsigned long msgId);
+    void deliverMessages(unsigned long senderId, const std::string& messages);
+    void sendAck(in_addr_t destIp, unsigned short destPort, unsigned long packetId);
     void handleAck(unsigned long msgId);
     void logDelivery(unsigned long senderId, const std::string& message);
     void logSend(const std::string& message);

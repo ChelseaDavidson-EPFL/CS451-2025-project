@@ -10,7 +10,7 @@
 #include "PerfectLink.hpp"
 
 // TODO - ************ TURN THIS OFF BEFORE SUBMISSION ****************
-// #define DEBUG;
+// #define DEBUG
 
 #ifdef DEBUG
     #define DEBUGLOG(msg) (std::cout << msg << std::endl)
@@ -22,6 +22,8 @@ PerfectLink::PerfectLink(unsigned long processId, in_addr_t processIp, unsigned 
     : processId_(processId), processPort_(processPort), processIp_(processIp), receiverId_(receiverId), receiverIp_(receiverIp), receiverPort_(receiverPort), hostMapByPort_(hostMapByPort), logPath_(logPath), running_(false)
 {
     seqNumber_ = 0;
+    partialPacket_ = "";
+
     if (processId_ == receiverId_) {
         initReceiver();
     } else {
@@ -45,13 +47,10 @@ PerfectLink::PerfectLink(unsigned long processId, in_addr_t processIp, unsigned 
 
     DEBUGLOG("Created log file: " << logPath_);
 
-    // Save log path for later use
-    logPath_;
-
-
 }
 
 PerfectLink::~PerfectLink() {
+    flushMessages();
     stop();
     close(sockfd_);
 }
@@ -130,7 +129,7 @@ void PerfectLink::initReceiver() {
             continue;
 
         // Initialize first missing message to 1
-        firstMissingMessageId_[processId] = 1;
+        firstMissingPacketId_[processId] = 1;
     }
 
     running_ = true;
@@ -141,50 +140,77 @@ void PerfectLink::initReceiver() {
 }
 
 void PerfectLink::sendMessage(const std::string& message) {
-    // Store in pending map
-    seqNumber_ += 1;
-    addMessageToPending(Message({seqNumber_, message}));
+    // Adding message to current packet being built
+    if (partialPacket_.size() + message.size() > maxPacketSize_ && partialPacket_.size() > 0) { // TODO - check enough time has past
+        // Store in pending map before adding this message because it will be too big
+        addFinishedPacketToPending();
+        partialPacket_ = message;
+    } else {
+        if (partialPacket_.size() == 0) {
+            partialPacket_ = message;
+        } else {
+            partialPacket_ += "|" + message;
+        }
+    }
 
+    // Checking if partial packet is big enough to be sent
+    if (partialPacket_.size() > maxPacketSize_) {
+        addFinishedPacketToPending();
+        partialPacket_ = "";
+    }
+    
     // Start resend thread if not already running
     if (!resendThread_.joinable()) {
-        resendThread_ = std::thread(&PerfectLink::sendMessageLoop, this);
+        resendThread_ = std::thread(&PerfectLink::sendPacketLoop, this);
         DEBUGLOG("Starting sending thread");
     }
     logSend(message);
 }
 
-void PerfectLink::addMessageToPending(Message message) {
-    std::lock_guard<std::mutex> lock(pendingMapMutex);   
-    pending_[message.id] = message;
+void PerfectLink::flushMessages() {
+    if (partialPacket_.size() > 0) {
+        addFinishedPacketToPending();
+        partialPacket_ = "";
+    }
 }
 
-void PerfectLink::sendMessageLoop() {
+void PerfectLink::addFinishedPacketToPending() {
+    seqNumber_ += 1;
+    Packet packet = Packet({seqNumber_, partialPacket_});
+    std::lock_guard<std::mutex> lock(pendingMapMutex);   
+    pending_[packet.id] = packet;
+}
+
+void PerfectLink::sendPacketLoop() {
     while (running_) {
-        auto msgToSend = findMessageToSend();
-        
-        if (!msgToSend) { // Didn't find msg to send - messages were sent too recently - nothing to do
-            DEBUGLOG("Messages were sent too recently - waiting 10ms");
+        Packet packetToSend;
+        if (!findPacketToSend(packetToSend)) {
+            DEBUGLOG("Packets were sent too recently - waiting 10ms");
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            continue; 
+            continue;
         }
 
-        std::string payload = std::to_string(msgToSend->id) + "|" + msgToSend->message;
-        DEBUGLOG("Sending message: " << msgToSend->message);
+        std::string payload = std::to_string(packetToSend.id) + "|" + packetToSend.messages;
+        DEBUGLOG("Sending packet id=" << packetToSend.id << " payload: " << packetToSend.messages);
         sendRaw(payload, receiverIp_, receiverPort_);
     }
 }
 
-PerfectLink::Message* PerfectLink::findMessageToSend() {
+bool PerfectLink::findPacketToSend(Packet& outPacket) {
     auto now = Clock::now();
-    auto minDelay = std::chrono::milliseconds(200);
-    std::lock_guard<std::mutex> lock(pendingMapMutex); 
-    for (auto& [id, msg] : pending_) {
-        if (now - msg.lastSentTime > minDelay) {
-            msg.lastSentTime = now;
-            return &msg;
+    const std::chrono::milliseconds minDelay(200);
+
+    std::lock_guard<std::mutex> lock(pendingMapMutex);
+
+    for (auto& entry : pending_) {
+        Packet& pkt = entry.second;
+        if (now - pkt.lastSentTime > minDelay) {
+            pkt.lastSentTime = now;   // update while holding lock
+            outPacket = pkt;          // make a safe copy
+            return true;              // found one
         }
     }
-    return nullptr;
+    return false; // nothing ready
 }
 
 void PerfectLink::sendRaw(const std::string& payload, in_addr_t ip, unsigned short port){
@@ -234,14 +260,14 @@ void PerfectLink::receiverLoop() {
 
         // Extract message type
         if (payload.rfind("ACK:", 0) == 0) {
-            std::string msgIdStr = payload.substr(4);
+            std::string pktIdStr = payload.substr(4);
             try {
-                unsigned long msgId = std::stoul(msgIdStr);
-                handleAck(msgId);
+                unsigned long pktId = std::stoul(pktIdStr);
+                handleAck(pktId);
             } catch (std::invalid_argument&){
-                std::cerr << "Id in message payload was not a number" << std::endl; // TODO - check this only logs to error
+                std::cerr << "Id in packet payload was not a number" << std::endl; // TODO - check this only logs to error
             } catch (std::out_of_range&) {
-                std::cerr << "Id in message payload was out of range" << std::endl; // TODO - check this only logs to error
+                std::cerr << "Id in packet payload was out of range" << std::endl; // TODO - check this only logs to error
             }
             continue;
         }
@@ -256,17 +282,17 @@ void PerfectLink::receiverLoop() {
         // Get message info
         std::string idStr = payload.substr(0, sep);
         unsigned long id = std::stoul(idStr); // TODO - Add error checking for non-number -> reuse error checking in ack part
-        std::string message = payload.substr(sep + 1);
+        std::string messages = payload.substr(sep + 1);
         unsigned short senderPort = ntohs(senderAddr.sin_port);
         unsigned long senderId = hostMapByPort_[senderPort].first;
-        unsigned long firstMissingMessageId = firstMissingMessageId_[senderId];
+        unsigned long firstMissingPacketId = firstMissingPacketId_[senderId];
         DEBUGLOG("Just received (ProcessID, idStr): " << senderId << ", " << id);
 
         DEBUGLOG("Delivered at start of receive process");
         printDelivered();
-        DEBUGLOG("First missing message at start is: " << firstMissingMessageId);
+        DEBUGLOG("First missing packet at start is: " << firstMissingPacketId);
         // Check if already delivered:
-        if (id < firstMissingMessageId) { // Already delivered it but it has been cleaned from delivered_
+        if (id < firstMissingPacketId) { // Already delivered it but it has been cleaned from delivered_
             sendAck(senderAddr.sin_addr.s_addr, senderPort, id); // Send ack again in case they didn't receive it
             DEBUGLOG("Already delivered " << id << " from " << senderId << " so skipping");
             continue;
@@ -276,10 +302,10 @@ void PerfectLink::receiverLoop() {
         auto& deliveredSet = delivered_[senderId]; // TODO - do I need a mutex lock here?
     
 
-        if (id == firstMissingMessageId) { // The one we've been waiting for so deliver it
+        if (id == firstMissingPacketId) { // The one we've been waiting for so deliver it
             DEBUGLOG("Just received firstMissingMessageId so cleaning delivered");
             deliveredSet.insert(id);
-            if (deliverCallback_) deliverCallback_(senderId, message); // TODO - do they want us to log the ID or the message?
+            deliverMessages(senderId, messages); // TODO - do they want us to log the ID or the message?
             sendAck(senderAddr.sin_addr.s_addr, senderPort, id);
 
             // Now replace the firstMissingMessageId and clean deliveredSet
@@ -293,7 +319,7 @@ void PerfectLink::receiverLoop() {
                     if (prev + 1 != msgId) { // Found the gap
                         DEBUGLOG("Found the gap so removing up to gap");
                         deliveredSet.erase(prev);
-                        firstMissingMessageId_[senderId] = prev + 1;
+                        firstMissingPacketId_[senderId] = prev + 1;
                         gapFound = true;
                         break;
                     } else { // Haven't found the gap but can keep cleaning
@@ -305,7 +331,7 @@ void PerfectLink::receiverLoop() {
             if (!gapFound) {
                 // No gap found: all are in order
                 DEBUGLOG("Didn't find gap so removing whole list");
-                firstMissingMessageId_[senderId] = lastValue + 1;
+                firstMissingPacketId_[senderId] = lastValue + 1;
                 deliveredSet.clear();
             }
 
@@ -319,14 +345,28 @@ void PerfectLink::receiverLoop() {
             } else { // Not in our list so add and deliver it
                 DEBUGLOG("Message not in delivered list and wasn't one we were waiting for so we're delivering it and adding it to our list");
                 deliveredSet.insert(id);
-                if (deliverCallback_) deliverCallback_(senderId, message);
+                deliverMessages(senderId, messages);
                 sendAck(senderAddr.sin_addr.s_addr, senderPort, id);
             }
         }
         DEBUGLOG("Delivered list at end off the receiver processing");
         printDelivered();
-        DEBUGLOG("firstMissing at end of the receiver processing: " << firstMissingMessageId_[senderId]);
+        DEBUGLOG("firstMissing at end of the receiver processing: " << firstMissingPacketId_[senderId]);
     }
+}
+
+void PerfectLink::deliverMessages(unsigned long senderId, const std::string& messages) {
+    size_t start = 0;
+    size_t end;
+
+    DEBUGLOG("Delivering packet:\n" << messages);
+
+    while ((end = messages.find('|', start)) != std::string::npos) {
+        if (deliverCallback_) deliverCallback_(senderId, messages.substr(start, end - start)); // TODO - do they want us to log the ID or the message?
+        start = end + 1;
+    }
+    // Last token after the last delimiter
+    if (deliverCallback_) deliverCallback_(senderId, messages.substr(start)); // TODO - do they want us to log the ID or the message?
 }
 
 void PerfectLink::sendAck(in_addr_t destIp, unsigned short destPort, unsigned long msgId) {
@@ -334,9 +374,9 @@ void PerfectLink::sendAck(in_addr_t destIp, unsigned short destPort, unsigned lo
     sendRaw(ack, destIp, destPort);
 }
 
-void PerfectLink::handleAck(const unsigned long msgId) {
+void PerfectLink::handleAck(const unsigned long pktId) {
     std::lock_guard<std::mutex> lock(pendingMapMutex); // Destroys and lock and releases mutex when out of scope
-    auto it = pending_.find(msgId);
+    auto it = pending_.find(pktId);
     if (it != pending_.end()) {
         pending_.erase(it);
     }
