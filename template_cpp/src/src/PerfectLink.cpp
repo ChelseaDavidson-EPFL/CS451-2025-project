@@ -168,23 +168,23 @@ void PerfectLink::sendMessageLoop() {
             continue; 
         }
 
-        std::string payload = std::to_string(msgToSend.value().id) + "|" + msgToSend.value().message;
-        DEBUGLOG("Sending message: " << msgToSend.value().message);
+        std::string payload = std::to_string(msgToSend->id) + "|" + msgToSend->message;
+        DEBUGLOG("Sending message: " << msgToSend->message);
         sendRaw(payload, receiverIp_, receiverPort_);
     }
 }
 
-std::optional<PerfectLink::Message> PerfectLink::findMessageToSend() {
+PerfectLink::Message* PerfectLink::findMessageToSend() {
     auto now = Clock::now();
     auto minDelay = std::chrono::milliseconds(200);
     std::lock_guard<std::mutex> lock(pendingMapMutex); 
     for (auto& [id, msg] : pending_) {
         if (now - msg.lastSentTime > minDelay) {
             msg.lastSentTime = now;
-            return msg;
+            return &msg;
         }
     }
-    return std::nullopt;
+    return nullptr;
 }
 
 void PerfectLink::sendRaw(const std::string& payload, in_addr_t ip, unsigned short port){

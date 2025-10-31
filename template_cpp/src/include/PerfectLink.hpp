@@ -55,7 +55,7 @@ private:
     void initReceiver();
     void addMessageToPending(Message message);
     void sendMessageLoop();
-    std::optional<Message> findMessageToSend();
+    Message* findMessageToSend();
     void sendRaw(const std::string& payload, in_addr_t ip, unsigned short port);
     void receiverLoop();
     void sendAck(in_addr_t destIp, unsigned short destPort, unsigned long msgId);
