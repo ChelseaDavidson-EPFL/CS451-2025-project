@@ -9,6 +9,15 @@
 
 #include "PerfectLink.hpp"
 
+// TODO - ************ TURN THIS OFF BEFORE SUBMISSION ****************
+// #define DEBUG;
+
+#ifdef DEBUG
+    #define DEBUGLOG(msg) (std::cout << msg << std::endl)
+#else
+    #define DEBUGLOG(msg) do {} while(0) // no-op in release
+#endif
+
 PerfectLink::PerfectLink(unsigned long processId, in_addr_t processIp, unsigned short processPort, unsigned long receiverId, in_addr_t receiverIp, unsigned short receiverPort,std::unordered_map<unsigned short, std::pair<unsigned long, in_addr_t>> hostMapByPort, std::string logPath)
     : processId_(processId), processPort_(processPort), processIp_(processIp), receiverId_(receiverId), receiverIp_(receiverIp), receiverPort_(receiverPort), hostMapByPort_(hostMapByPort), logPath_(logPath), running_(false)
 {
@@ -20,7 +29,7 @@ PerfectLink::PerfectLink(unsigned long processId, in_addr_t processIp, unsigned 
     }
     
     deliverCallback_ = [this](unsigned long senderId, const std::string& message){
-        std::cout << "Delivered \"" << message << "\" from: " << senderId << std::endl;
+        DEBUGLOG("Delivered \"" << message << "\" from: " << senderId);
         logDelivery(senderId, message);
     };
 
@@ -34,7 +43,7 @@ PerfectLink::PerfectLink(unsigned long processId, in_addr_t processIp, unsigned 
     
     logFile.close();
 
-    std::cout << "Created log file: " << logPath_ << std::endl;
+    DEBUGLOG("Created log file: " << logPath_);
 
     // Save log path for later use
     logPath_;
@@ -78,10 +87,10 @@ void PerfectLink::initBroadcaster() {
     running_ = true;
     receiverThread_ = std::thread(&PerfectLink::receiverLoop, this);
 
-    std::cout << "Initialised " << processId_ << " as a broadcaster\n";
-    std::cout << "Listening for ACKs on port " << processPort_ << "\n";
-    std::cout << "Receiver IP is: " << receiverIp_ << "\n";
-    std::cout << "Receiver Port is: " << receiverPort_ << "\n";
+    DEBUGLOG("Initialised " << processId_ << " as a broadcaster");
+    DEBUGLOG("Listening for ACKs on port " << processPort_);
+    DEBUGLOG("Receiver IP is: " << receiverIp_);
+    DEBUGLOG("Receiver Port is: " << receiverPort_);
 }
 
 void PerfectLink::initReceiver() {
@@ -127,8 +136,8 @@ void PerfectLink::initReceiver() {
     running_ = true;
     receiverThread_ = std::thread(&PerfectLink::receiverLoop, this);
 
-    std::cout << "Listening on port " << receiverPort_ << "...\n";
-    std::cout << "Initialised " << processId_ << " as a receiver \n";
+    DEBUGLOG("Listening on port " << receiverPort_ << "...");
+    DEBUGLOG("Initialised " << processId_ << " as a receiver");
 }
 
 void PerfectLink::sendMessage(const std::string& message) {
@@ -139,7 +148,7 @@ void PerfectLink::sendMessage(const std::string& message) {
     // Start resend thread if not already running
     if (!resendThread_.joinable()) {
         resendThread_ = std::thread(&PerfectLink::sendMessageLoop, this);
-        std::cout << "Starting sending thread" << std::endl;
+        DEBUGLOG("Starting sending thread");
     }
     logSend(message);
 }
@@ -154,13 +163,13 @@ void PerfectLink::sendMessageLoop() {
         auto msgToSend = findMessageToSend();
         
         if (!msgToSend) { // Didn't find msg to send - messages were sent too recently - nothing to do
-            std::cout << "Messages were sent too recently - waiting 10ms" << std::endl;
+            DEBUGLOG("Messages were sent too recently - waiting 10ms");
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
             continue; 
         }
 
         std::string payload = std::to_string(msgToSend.value().id) + "|" + msgToSend.value().message;
-        std::cout << "Sending message: " << msgToSend.value().message << std::endl;
+        DEBUGLOG("Sending message: " << msgToSend.value().message);
         sendRaw(payload, receiverIp_, receiverPort_);
     }
 }
@@ -198,7 +207,7 @@ void PerfectLink::receiverLoop() {
     socklen_t senderLen = sizeof(senderAddr);
 
     while (running_) {
-        std::cout << "listening..." << std::endl;
+        DEBUGLOG("listening...");
 
         ssize_t bytes = recvfrom(sockfd_, buffer, sizeof(buffer)-1, 0,
                     reinterpret_cast<sockaddr*>(&senderAddr), &senderLen);
@@ -251,15 +260,15 @@ void PerfectLink::receiverLoop() {
         unsigned short senderPort = ntohs(senderAddr.sin_port);
         unsigned long senderId = hostMapByPort_[senderPort].first;
         unsigned long firstMissingMessageId = firstMissingMessageId_[senderId];
-        std::cout << "Just received (ProcessID, idStr): " << senderId << ", " << id << std::endl;
+        DEBUGLOG("Just received (ProcessID, idStr): " << senderId << ", " << id);
 
-        std::cout<<"Delivered at start of receive process";
+        DEBUGLOG("Delivered at start of receive process");
         printDelivered();
-        std::cout << "First missing message at start is: " << firstMissingMessageId << std::endl;
+        DEBUGLOG("First missing message at start is: " << firstMissingMessageId);
         // Check if already delivered:
         if (id < firstMissingMessageId) { // Already delivered it but it has been cleaned from delivered_
             sendAck(senderAddr.sin_addr.s_addr, senderPort, id); // Send ack again in case they didn't receive it
-            std::cout << "Already delivered " << id << " from " << senderId << " so skipping" << std::endl;
+            DEBUGLOG("Already delivered " << id << " from " << senderId << " so skipping");
             continue;
         }
         
@@ -268,7 +277,7 @@ void PerfectLink::receiverLoop() {
     
 
         if (id == firstMissingMessageId) { // The one we've been waiting for so deliver it
-            std::cout << "Just received firstMissingMessageId so cleaning delivered" << std::endl;
+            DEBUGLOG("Just received firstMissingMessageId so cleaning delivered");
             deliveredSet.insert(id);
             if (deliverCallback_) deliverCallback_(senderId, message); // TODO - do they want us to log the ID or the message?
             sendAck(senderAddr.sin_addr.s_addr, senderPort, id);
@@ -282,7 +291,7 @@ void PerfectLink::receiverLoop() {
                     prev = msgId;
                 } else { // Not at the first value
                     if (prev + 1 != msgId) { // Found the gap
-                        std::cout << "Found the gap so removing up to gap" << std::endl;
+                        DEBUGLOG("Found the gap so removing up to gap");
                         deliveredSet.erase(prev);
                         firstMissingMessageId_[senderId] = prev + 1;
                         gapFound = true;
@@ -295,7 +304,7 @@ void PerfectLink::receiverLoop() {
             }
             if (!gapFound) {
                 // No gap found: all are in order
-                std::cout << "Didn't find gap so removing whole list" << std::endl;
+                DEBUGLOG("Didn't find gap so removing whole list");
                 firstMissingMessageId_[senderId] = lastValue + 1;
                 deliveredSet.clear();
             }
@@ -304,19 +313,19 @@ void PerfectLink::receiverLoop() {
             auto it = deliveredSet.find(id);
 
             if (it != deliveredSet.end()) { // Already in our list
-                std::cout << "Message was in delivered list" << std::endl;
+                DEBUGLOG("Message was in delivered list");
                 sendAck(senderAddr.sin_addr.s_addr, senderPort, id); // Send ack again in case they didn't receive it
                 continue;
             } else { // Not in our list so add and deliver it
-                std::cout << "Message not in delivered list and wasn't one we were waiting for so we're delivering it and adding it to our list" << std::endl;
+                DEBUGLOG("Message not in delivered list and wasn't one we were waiting for so we're delivering it and adding it to our list");
                 deliveredSet.insert(id);
                 if (deliverCallback_) deliverCallback_(senderId, message);
                 sendAck(senderAddr.sin_addr.s_addr, senderPort, id);
             }
         }
-        std::cout << "Delivered list at end off the receiver processing" << std::endl;
+        DEBUGLOG("Delivered list at end off the receiver processing");
         printDelivered();
-        std::cout << "firstMissing at end of the receiver processing: " << firstMissingMessageId_[senderId] << std::endl;
+        DEBUGLOG("firstMissing at end of the receiver processing: " << firstMissingMessageId_[senderId]);
     }
 }
 
@@ -365,12 +374,14 @@ void PerfectLink::stop() {
 }
 
 void PerfectLink::printDelivered() const {
-    std::cout << "\n===== Delivered Messages =====\n";
-    for (const auto& [senderId, messages] : delivered_) {
-        std::cout << "From process " << senderId << ":\n";
-        for (const auto& msgId : messages) {
-            std::cout << "  ID " << msgId << '\n';
+    #ifdef DEBUG
+        DEBUGLOG("\n===== Delivered Messages =====\n");
+        for (const auto& [senderId, messages] : delivered_) {
+            DEBUGLOG("From process " << senderId << ":");
+            for (const auto& msgId : messages) {
+                DEBUGLOG("  ID " << msgId);
+            }
         }
-    }
-    std::cout << "==============================\n";
+        DEBUGLOG("==============================");
+    #endif
 }

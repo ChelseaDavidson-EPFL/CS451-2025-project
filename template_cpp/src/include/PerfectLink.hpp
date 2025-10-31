@@ -64,5 +64,4 @@ private:
     void logSend(const std::string& message);
     void stop();
     void printDelivered() const;
-
 };
