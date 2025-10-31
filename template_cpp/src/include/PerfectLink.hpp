@@ -39,7 +39,7 @@ private:
       struct Message {
         std::string id;
         std::string message;
-        Clock::time_point lastSentTime = Clock::now();
+        Clock::time_point lastSentTime = Clock::now() - std::chrono::milliseconds(200); // So that it sends the message immediately in sendMessageLoop
     };
 
     struct CompareNumericStrings {
@@ -50,7 +50,7 @@ private:
 
     std::unordered_map<std::string, Message> pending_;
 
-    std::mutex mapMutex;
+    std::mutex pendingMapMutex;
 
     int seqNumber_;
     std::function<void(unsigned long, const std::string&)> deliverCallback_;
@@ -59,7 +59,9 @@ private:
 
     void initBroadcaster();
     void initReceiver();
+    void addMessageToPending(Message message);
     void sendMessageLoop();
+    std::optional<Message> findMessageToSend();
     void sendRaw(const std::string& payload, in_addr_t ip, unsigned short port);
     void receiverLoop();
     void sendAck(in_addr_t destIp, unsigned short destPort, const std::string& msgId);

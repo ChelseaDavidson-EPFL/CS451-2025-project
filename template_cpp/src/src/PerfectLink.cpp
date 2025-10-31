@@ -135,11 +135,7 @@ void PerfectLink::sendMessage(const std::string& message) {
     // Store in pending map
     seqNumber_ += 1;
     std::string id = std::to_string(seqNumber_);
-    mapMutex.lock();
-    //TODO - add check it isn't already in pending
-    pending_[id] = Message({id, message}); // TODO - add handling for 0 time
-    mapMutex.unlock();
-    std::string payload = id + "|" + message;
+    addMessageToPending(Message({id, message}));
 
     // Start resend thread if not already running
     if (!resendThread_.joinable()) {
@@ -149,44 +145,38 @@ void PerfectLink::sendMessage(const std::string& message) {
     logSend(message);
 }
 
+void PerfectLink::addMessageToPending(Message message) {
+    std::lock_guard<std::mutex> lock(pendingMapMutex);   
+    pending_[message.id] = message;
+}
+
 void PerfectLink::sendMessageLoop() {
     while (running_) {
-        // std::cout << "In send message loop" << std::endl;
-        // std::this_thread::sleep_for(std::chrono::milliseconds(500));
-        std::this_thread::sleep_for(std::chrono::milliseconds(5)); // baseline pacing
-
-        auto now = Clock::now();
-        bool hasFound = false; // To check if we have a message to send
-        Message msgToSend; 
-        std::unique_lock<std::mutex> lock(mapMutex);
-
-        for (auto& [id, msg] : pending_) {
-            if (now - msg.lastSentTime > std::chrono::milliseconds(200)) {
-                std::cout << "Found message to send" << std::endl;
-                msgToSend = msg;
-                msg.lastSentTime = now;
-                hasFound = true;
-                break;
-            }
-        }
-        lock.unlock();
-
-        if (!hasFound) { // Messages were sent too recently - nothing to do
+        auto msgToSend = findMessageToSend();
+        
+        if (!msgToSend) { // Didn't find msg to send - messages were sent too recently - nothing to do
             std::cout << "Messages were sent too recently - waiting 10ms" << std::endl;
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
             continue; 
         }
 
-        std::string payload = msgToSend.id + "|" + msgToSend.message;
-        std::cout << "Sending message: " << msgToSend.message << std::endl;
+        std::string payload = msgToSend.value().id + "|" + msgToSend.value().message;
+        std::cout << "Sending message: " << msgToSend.value().message << std::endl;
         sendRaw(payload, receiverIp_, receiverPort_);
+    }
+}
 
-        // If backlog grows, sleep longer to avoid flooding
-        if (pending_.size() > 100) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            std::cout << "Num messages to send too big - waiting 100ms" << std::endl;
+std::optional<PerfectLink::Message> PerfectLink::findMessageToSend() {
+    auto now = Clock::now();
+    auto minDelay = std::chrono::milliseconds(200);
+    std::lock_guard<std::mutex> lock(pendingMapMutex); 
+    for (auto& [id, msg] : pending_) {
+        if (now - msg.lastSentTime > minDelay) {
+            msg.lastSentTime = now;
+            return msg;
         }
     }
+    return std::nullopt;
 }
 
 void PerfectLink::sendRaw(const std::string& payload, in_addr_t ip, unsigned short port){
@@ -329,7 +319,7 @@ void PerfectLink::sendAck(in_addr_t destIp, unsigned short destPort, const std::
 }
 
 void PerfectLink::handleAck(const std::string& msgId) {
-    std::lock_guard<std::mutex> lock(mapMutex);
+    std::lock_guard<std::mutex> lock(pendingMapMutex); // Destroys and lock and releases mutex when out of scope
     auto it = pending_.find(msgId);
     if (it != pending_.end()) {
         pending_.erase(it);
