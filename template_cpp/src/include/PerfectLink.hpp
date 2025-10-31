@@ -37,25 +37,19 @@ private:
     using Clock = std::chrono::steady_clock;
 
       struct Message {
-        std::string id;
+        unsigned long id;
         std::string message;
         Clock::time_point lastSentTime = Clock::now() - std::chrono::milliseconds(200); // So that it sends the message immediately in sendMessageLoop
     };
 
-    struct CompareNumericStrings {
-        bool operator()(const std::string& a, const std::string& b) const {
-            return std::stoi(a) < std::stoi(b);
-        }
-    };
-
-    std::unordered_map<std::string, Message> pending_;
+    std::unordered_map<unsigned long, Message> pending_;
 
     std::mutex pendingMapMutex;
 
-    int seqNumber_;
+    unsigned long seqNumber_;
     std::function<void(unsigned long, const std::string&)> deliverCallback_;
-    std::map<unsigned long, std::set<std::string, CompareNumericStrings>> delivered_; // Outer key: processId, Inner pair: message sequence number (id), message content
-    std::map<unsigned long, std::string> firstMissingMessage_; // Outer key: processId, Inner value: firstMissingMessage_
+    std::map<unsigned long, std::set<unsigned long>> delivered_; // Outer key: processId, Inner pair: message sequence number (id), message content
+    std::map<unsigned long, unsigned long> firstMissingMessageId_; // Outer key: processId, Inner value: firstMissingMessage_
 
     void initBroadcaster();
     void initReceiver();
@@ -64,8 +58,8 @@ private:
     std::optional<Message> findMessageToSend();
     void sendRaw(const std::string& payload, in_addr_t ip, unsigned short port);
     void receiverLoop();
-    void sendAck(in_addr_t destIp, unsigned short destPort, const std::string& msgId);
-    void handleAck(const std::string& msgId);
+    void sendAck(in_addr_t destIp, unsigned short destPort, unsigned long msgId);
+    void handleAck(unsigned long msgId);
     void logDelivery(unsigned long senderId, const std::string& message);
     void logSend(const std::string& message);
     void stop();

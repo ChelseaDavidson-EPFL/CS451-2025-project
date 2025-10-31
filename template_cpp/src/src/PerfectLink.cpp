@@ -120,8 +120,8 @@ void PerfectLink::initReceiver() {
         if (port == receiverPort_)
             continue;
 
-        // Initialize first missing message to "1"
-        firstMissingMessage_[processId] = "1";
+        // Initialize first missing message to 1
+        firstMissingMessageId_[processId] = 1;
     }
 
     running_ = true;
@@ -134,8 +134,7 @@ void PerfectLink::initReceiver() {
 void PerfectLink::sendMessage(const std::string& message) {
     // Store in pending map
     seqNumber_ += 1;
-    std::string id = std::to_string(seqNumber_);
-    addMessageToPending(Message({id, message}));
+    addMessageToPending(Message({seqNumber_, message}));
 
     // Start resend thread if not already running
     if (!resendThread_.joinable()) {
@@ -160,7 +159,7 @@ void PerfectLink::sendMessageLoop() {
             continue; 
         }
 
-        std::string payload = msgToSend.value().id + "|" + msgToSend.value().message;
+        std::string payload = std::to_string(msgToSend.value().id) + "|" + msgToSend.value().message;
         std::cout << "Sending message: " << msgToSend.value().message << std::endl;
         sendRaw(payload, receiverIp_, receiverPort_);
     }
@@ -226,33 +225,41 @@ void PerfectLink::receiverLoop() {
 
         // Extract message type
         if (payload.rfind("ACK:", 0) == 0) {
-            std::string msgId = payload.substr(4);
-            handleAck(msgId);
+            std::string msgIdStr = payload.substr(4);
+            try {
+                unsigned long msgId = std::stoul(msgIdStr);
+                handleAck(msgId);
+            } catch (std::invalid_argument&){
+                std::cerr << "Id in message payload was not a number" << std::endl; // TODO - check this only logs to error
+            } catch (std::out_of_range&) {
+                std::cerr << "Id in message payload was out of range" << std::endl; // TODO - check this only logs to error
+            }
             continue;
         }
 
         // Parse as normal message
         size_t sep = payload.find('|');
         if (sep == std::string::npos) {
-            perror("incorrect payload format");
+            std::cerr << "incorrect payload format" << std::endl; // TODO - check this only logs to error
             continue;
         }
 
         // Get message info
         std::string idStr = payload.substr(0, sep);
+        unsigned long id = std::stoul(idStr); // TODO - Add error checking for non-number -> reuse error checking in ack part
         std::string message = payload.substr(sep + 1);
         unsigned short senderPort = ntohs(senderAddr.sin_port);
         unsigned long senderId = hostMapByPort_[senderPort].first;
-        std::string& firstMissingMessage = firstMissingMessage_[senderId];
-        std::cout << "Just received (ProcessID, idStr): " << senderId << ", " << idStr << std::endl;
+        unsigned long firstMissingMessageId = firstMissingMessageId_[senderId];
+        std::cout << "Just received (ProcessID, idStr): " << senderId << ", " << id << std::endl;
 
         std::cout<<"Delivered at start of receive process";
         printDelivered();
-        std::cout << "First missing message at start is: " << firstMissingMessage << std::endl;
+        std::cout << "First missing message at start is: " << firstMissingMessageId << std::endl;
         // Check if already delivered:
-        if (std::stoi(idStr) < std::stoi(firstMissingMessage)) { // Already delivered it but it has been cleaned from delivered_
-            sendAck(senderAddr.sin_addr.s_addr, senderPort, idStr); // Send ack again in case they didn't receive it
-            std::cout << "Already delivered " << idStr << " from " << senderId << " so skipping" << std::endl;
+        if (id < firstMissingMessageId) { // Already delivered it but it has been cleaned from delivered_
+            sendAck(senderAddr.sin_addr.s_addr, senderPort, id); // Send ack again in case they didn't receive it
+            std::cout << "Already delivered " << id << " from " << senderId << " so skipping" << std::endl;
             continue;
         }
         
@@ -260,24 +267,24 @@ void PerfectLink::receiverLoop() {
         auto& deliveredSet = delivered_[senderId]; // TODO - do I need a mutex lock here?
     
 
-        if (std::stoi(idStr) == std::stoi(firstMissingMessage)) { // The one we've been waiting for so deliver it
-            std::cout << "Just received firstMissingMessage so cleaning delivered" << std::endl;
-            deliveredSet.insert(idStr);
-            if (deliverCallback_) deliverCallback_(senderId, message);
-            sendAck(senderAddr.sin_addr.s_addr, senderPort, idStr);
+        if (id == firstMissingMessageId) { // The one we've been waiting for so deliver it
+            std::cout << "Just received firstMissingMessageId so cleaning delivered" << std::endl;
+            deliveredSet.insert(id);
+            if (deliverCallback_) deliverCallback_(senderId, message); // TODO - do they want us to log the ID or the message?
+            sendAck(senderAddr.sin_addr.s_addr, senderPort, id);
 
-            // TODO -> now replace the firstMissingMessage and clean deliveredSet
-            std::string prev = "0";
+            // Now replace the firstMissingMessageId and clean deliveredSet
+            unsigned long prev = 0;
             bool gapFound = false;
-            std::string lastValue = *deliveredSet.rbegin();
-            for (std::string msgId : deliveredSet) {
-                if (prev == "0") { // At the first value so skip
+            unsigned long lastValue = *deliveredSet.rbegin();
+            for (unsigned long msgId : deliveredSet) {
+                if (prev == 0) { // At the first value so skip
                     prev = msgId;
                 } else { // Not at the first value
-                    if (std::stoi(prev) + 1 != std::stoi(msgId)) { // Found the gap
+                    if (prev + 1 != msgId) { // Found the gap
                         std::cout << "Found the gap so removing up to gap" << std::endl;
                         deliveredSet.erase(prev);
-                        firstMissingMessage = std::to_string(std::stoi(prev) + 1);
+                        firstMissingMessageId_[senderId] = prev + 1;
                         gapFound = true;
                         break;
                     } else { // Haven't found the gap but can keep cleaning
@@ -289,36 +296,36 @@ void PerfectLink::receiverLoop() {
             if (!gapFound) {
                 // No gap found: all are in order
                 std::cout << "Didn't find gap so removing whole list" << std::endl;
-                firstMissingMessage = std::to_string(std::stoi(lastValue) + 1);
+                firstMissingMessageId_[senderId] = lastValue + 1;
                 deliveredSet.clear();
             }
 
         } else { // Either in our delivered set or never been delivered
-            auto it = deliveredSet.find(idStr);
+            auto it = deliveredSet.find(id);
 
             if (it != deliveredSet.end()) { // Already in our list
                 std::cout << "Message was in delivered list" << std::endl;
-                sendAck(senderAddr.sin_addr.s_addr, senderPort, idStr); // Send ack again in case they didn't receive it
+                sendAck(senderAddr.sin_addr.s_addr, senderPort, id); // Send ack again in case they didn't receive it
                 continue;
             } else { // Not in our list so add and deliver it
                 std::cout << "Message not in delivered list and wasn't one we were waiting for so we're delivering it and adding it to our list" << std::endl;
-                deliveredSet.insert(idStr);
+                deliveredSet.insert(id);
                 if (deliverCallback_) deliverCallback_(senderId, message);
-                sendAck(senderAddr.sin_addr.s_addr, senderPort, idStr);
+                sendAck(senderAddr.sin_addr.s_addr, senderPort, id);
             }
         }
         std::cout << "Delivered list at end off the receiver processing" << std::endl;
         printDelivered();
-        std::cout << "firstMissing at end of the receiver processing: " << firstMissingMessage_[senderId] << std::endl;
+        std::cout << "firstMissing at end of the receiver processing: " << firstMissingMessageId_[senderId] << std::endl;
     }
 }
 
-void PerfectLink::sendAck(in_addr_t destIp, unsigned short destPort, const std::string& msgId) {
-    std::string ack = "ACK:" + msgId;
+void PerfectLink::sendAck(in_addr_t destIp, unsigned short destPort, unsigned long msgId) {
+    std::string ack = "ACK:" + std::to_string(msgId);
     sendRaw(ack, destIp, destPort);
 }
 
-void PerfectLink::handleAck(const std::string& msgId) {
+void PerfectLink::handleAck(const unsigned long msgId) {
     std::lock_guard<std::mutex> lock(pendingMapMutex); // Destroys and lock and releases mutex when out of scope
     auto it = pending_.find(msgId);
     if (it != pending_.end()) {
