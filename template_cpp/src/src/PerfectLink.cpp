@@ -164,7 +164,6 @@ void PerfectLink::sendMessage(const std::string& message) {
         resendThread_ = std::thread(&PerfectLink::sendPacketLoop, this);
         DEBUGLOG("Starting sending thread");
     }
-    logSend(message);
 }
 
 void PerfectLink::flushMessages() {
@@ -177,6 +176,7 @@ void PerfectLink::flushMessages() {
 void PerfectLink::addFinishedPacketToPending() {
     seqNumber_ += 1;
     Packet packet = Packet({seqNumber_, partialPacket_});
+    logSendPacket(partialPacket_);
     std::lock_guard<std::mutex> lock(pendingMapMutex);   
     pending_[packet.id] = packet;
 }
@@ -393,14 +393,22 @@ void PerfectLink::logDelivery(unsigned long senderId, const std::string& message
     logFile.close();
 }
 
-void PerfectLink::logSend(const std::string& message) {
+void PerfectLink::logSendPacket(const std::string& packet) {
     std::ofstream logFile(logPath_.c_str(), std::ios::app);
     if (!logFile.is_open()) {
         std::cerr << "Failed to open log file: " << logPath_ << std::endl;
         return;
     }
 
-    logFile << "b " << message << "\n";
+    size_t start = 0;
+    size_t end;
+    while ((end = packet.find('|', start)) != std::string::npos) {
+        logFile << "b " << packet.substr(start, end - start) << "\n";
+        start = end + 1;
+    }
+
+    // Last token after the last delimiter
+    logFile << "b " << packet.substr(start) << "\n";
     logFile.close();
 }
 

@@ -65,7 +65,7 @@ private:
     void sendAck(in_addr_t destIp, unsigned short destPort, unsigned long packetId);
     void handleAck(unsigned long msgId);
     void logDelivery(unsigned long senderId, const std::string& message);
-    void logSend(const std::string& message);
+    void logSendPacket(const std::string& packet);
     void stop();
     void printDelivered() const;
 };
