@@ -223,10 +223,6 @@ void PerfectLink::sendRaw(const std::string& payload, in_addr_t ip, unsigned sho
            reinterpret_cast<sockaddr*>(&dest), sizeof(dest));
 }
 
-// void PerfectLink::addSendToLog(const std::string& message) { // TODO
-    
-// }
-
 void PerfectLink::receiverLoop() {
     char buffer[1024];
     sockaddr_in senderAddr{};
@@ -261,27 +257,27 @@ void PerfectLink::receiverLoop() {
         // Extract message type
         if (payload.rfind("ACK:", 0) == 0) {
             std::string pktIdStr = payload.substr(4);
-            try {
-                unsigned long pktId = std::stoul(pktIdStr);
-                handleAck(pktId);
-            } catch (std::invalid_argument&){
-                std::cerr << "Id in packet payload was not a number" << std::endl; // TODO - check this only logs to error
-            } catch (std::out_of_range&) {
-                std::cerr << "Id in packet payload was out of range" << std::endl; // TODO - check this only logs to error
+            unsigned long pktId = parsePayloadId(pktIdStr);
+            if (pktId == 0) {
+                continue;
             }
+            handleAck(pktId);
             continue;
         }
 
         // Parse as normal message
         size_t sep = payload.find('|');
         if (sep == std::string::npos) {
-            std::cerr << "incorrect payload format" << std::endl; // TODO - check this only logs to error
+            std::cerr << "Incorrect payload format" << std::endl;
             continue;
         }
 
         // Get message info
         std::string idStr = payload.substr(0, sep);
-        unsigned long id = std::stoul(idStr); // TODO - Add error checking for non-number -> reuse error checking in ack part
+        unsigned long id = parsePayloadId(idStr);
+        if (id == 0) {
+            continue;
+        }
         std::string messages = payload.substr(sep + 1);
         unsigned short senderPort = ntohs(senderAddr.sin_port);
         unsigned long senderId = hostMapByPort_[senderPort].first;
@@ -355,6 +351,20 @@ void PerfectLink::receiverLoop() {
     }
 }
 
+unsigned long PerfectLink::parsePayloadId(const std::string& packetIdStr) {
+    try {
+        unsigned long pktId = std::stoul(packetIdStr);
+        return pktId;
+    } catch (std::invalid_argument&){
+        std::cerr << "Id in packet payload was not a number" << std::endl;
+        return 0;
+    } catch (std::out_of_range&) {
+        std::cerr << "Id in packet payload was out of range" << std::endl;
+        return 0;
+    }
+    return 0;
+}
+
 void PerfectLink::deliverMessages(unsigned long senderId, const std::string& messages) {
     size_t start = 0;
     size_t end;
@@ -418,7 +428,6 @@ void PerfectLink::stop() {
     if (receiverThread_.joinable()) receiverThread_.join();
     if (resendThread_.joinable()) resendThread_.join();
     printDelivered();
-    // logFile.close(); // TODO
 }
 
 void PerfectLink::printDelivered() const {

@@ -61,6 +61,7 @@ private:
     bool findPacketToSend(Packet& packet);
     void sendRaw(const std::string& payload, in_addr_t ip, unsigned short port);
     void receiverLoop();
+    unsigned long parsePayloadId(const std::string& packetIdStr);
     void deliverMessages(unsigned long senderId, const std::string& messages);
     void sendAck(in_addr_t destIp, unsigned short destPort, unsigned long packetId);
     void handleAck(unsigned long msgId);
