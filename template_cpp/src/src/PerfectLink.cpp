@@ -460,12 +460,25 @@ void PerfectLink::logSendPacket(const std::string& packet) {
     size_t start = 0;
     size_t end;
     while ((end = packet.find('|', start)) != std::string::npos) {
-        logFile << "b " << packet.substr(start, end - start) << "\n";
+        std::string messagePayload = packet.substr(start, end - start);
+        size_t sep = messagePayload.find(':');
+        if (sep == std::string::npos) {
+            std::cerr << "Incorrect payload format of message, cannot send packet" << std::endl;
+            return;
+        }
+        std::string msgIdStr = messagePayload.substr(0, sep);
+        logFile << "b " << msgIdStr << "\n";
         start = end + 1;
     }
-
     // Last token after the last delimiter
-    logFile << "b " << packet.substr(start) << "\n";
+    std::string messagePayload = packet.substr(start);
+    size_t sep = messagePayload.find(':');
+    if (sep == std::string::npos) {
+        std::cerr << "Incorrect payload format of message, cannot send packet" << std::endl;
+        return;
+    }
+    std::string msgIdStr = messagePayload.substr(0, sep);
+    logFile << "b " << msgIdStr << "\n";
     logFile.close();
 }
 
