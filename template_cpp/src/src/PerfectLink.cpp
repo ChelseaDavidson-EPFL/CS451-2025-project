@@ -21,7 +21,8 @@
 PerfectLink::PerfectLink(unsigned long processId, in_addr_t processIp, unsigned short processPort, unsigned long receiverId, in_addr_t receiverIp, unsigned short receiverPort,std::unordered_map<unsigned short, std::pair<unsigned long, in_addr_t>> hostMapByPort, std::string logPath)
     : processId_(processId), processPort_(processPort), processIp_(processIp), receiverId_(receiverId), receiverIp_(receiverIp), receiverPort_(receiverPort), hostMapByPort_(hostMapByPort), logPath_(logPath), running_(false)
 {
-    seqNumber_ = 0;
+    packetSeqNumber_ = 0;
+    msgSeqNumber_ = 0;
     partialPacket_ = "";
 
     if (processId_ == receiverId_) {
@@ -30,9 +31,9 @@ PerfectLink::PerfectLink(unsigned long processId, in_addr_t processIp, unsigned 
         initBroadcaster();
     }
     
-    deliverCallback_ = [this](unsigned long senderId, const std::string& message){
-        DEBUGLOG("Delivered \"" << message << "\" from: " << senderId);
-        logDelivery(senderId, message);
+    deliverCallback_ = [this](unsigned long senderId, unsigned long messageId){
+        DEBUGLOG("Delivered \"" << messageId << "\" from: " << senderId);
+        logDelivery(senderId, messageId);
     };
 
 
@@ -140,16 +141,20 @@ void PerfectLink::initReceiver() {
 }
 
 void PerfectLink::sendMessage(const std::string& message) {
+    // Add messageId to message payload
+    msgSeqNumber_++;
+    std::string messagePayload = std::to_string(msgSeqNumber_) + ":" + message; // Final payload will be pktId|msgId:msg|mgId:msg ...
+    
     // Adding message to current packet being built
-    if (partialPacket_.size() + message.size() > maxPacketSize_ && partialPacket_.size() > 0) { // TODO - check enough time has past
+    if (partialPacket_.size() + messagePayload.size() > maxPacketSize_ && partialPacket_.size() > 0) { // TODO - check enough time has past
         // Store in pending map before adding this message because it will be too big
         addFinishedPacketToPending();
-        partialPacket_ = message;
+        partialPacket_ = messagePayload;
     } else {
         if (partialPacket_.size() == 0) {
-            partialPacket_ = message;
+            partialPacket_ = messagePayload;
         } else {
-            partialPacket_ += "|" + message;
+            partialPacket_ += "|" + messagePayload;
         }
     }
 
@@ -174,8 +179,8 @@ void PerfectLink::flushMessages() {
 }
 
 void PerfectLink::addFinishedPacketToPending() {
-    seqNumber_ += 1;
-    Packet packet = Packet({seqNumber_, partialPacket_});
+    packetSeqNumber_ += 1;
+    Packet packet = Packet({packetSeqNumber_, partialPacket_});
     logSendPacket(partialPacket_);
     std::lock_guard<std::mutex> lock(pendingMapMutex);   
     pending_[packet.id] = packet;
@@ -257,8 +262,8 @@ void PerfectLink::receiverLoop() {
         // Extract message type
         if (payload.rfind("ACK:", 0) == 0) {
             std::string pktIdStr = payload.substr(4);
-            unsigned long pktId = parsePayloadId(pktIdStr);
-            if (pktId == 0) {
+            unsigned long pktId = parsePacketPayloadId(pktIdStr);
+            if (pktId == 0) { // TODO - add more meaningful error
                 continue;
             }
             handleAck(pktId);
@@ -274,8 +279,8 @@ void PerfectLink::receiverLoop() {
 
         // Get message info
         std::string idStr = payload.substr(0, sep);
-        unsigned long id = parsePayloadId(idStr);
-        if (id == 0) {
+        unsigned long id = parsePacketPayloadId(idStr);
+        if (id == 0) { // TODO - Add more meaningful error
             continue;
         }
         std::string messages = payload.substr(sep + 1);
@@ -299,9 +304,13 @@ void PerfectLink::receiverLoop() {
     
 
         if (id == firstMissingPacketId) { // The one we've been waiting for so deliver it
-            DEBUGLOG("Just received firstMissingMessageId so cleaning delivered");
+            DEBUGLOG("Just received firstMissingMessageId so attempting to deliver and clean delivered");
+            if (!deliverMessages(senderId, messages)) { // Couldn't deliver one or more of the messages, so don't acknowledge
+                DEBUGLOG("Failed to deliver one or more of the messages so skipping this packet");
+                std::cerr << "Failed to deliver one or more of the messages so skipping packet with id: " << id << std::endl;
+                continue;
+            } 
             deliveredSet.insert(id);
-            deliverMessages(senderId, messages); // TODO - do they want us to log the ID or the message?
             sendAck(senderAddr.sin_addr.s_addr, senderPort, id);
 
             // Now replace the firstMissingMessageId and clean deliveredSet
@@ -340,8 +349,12 @@ void PerfectLink::receiverLoop() {
                 continue;
             } else { // Not in our list so add and deliver it
                 DEBUGLOG("Message not in delivered list and wasn't one we were waiting for so we're delivering it and adding it to our list");
+                if (!deliverMessages(senderId, messages)) { // Couldn't deliver one or more of the messages, so don't acknowledge
+                    DEBUGLOG("Failed to deliver one or more of the messages so skipping this packet");
+                    std::cerr << "Failed to deliver one or more of the messages so skipping packet with id: " << id << std::endl;
+                    continue;
+                } 
                 deliveredSet.insert(id);
-                deliverMessages(senderId, messages);
                 sendAck(senderAddr.sin_addr.s_addr, senderPort, id);
             }
         }
@@ -351,7 +364,7 @@ void PerfectLink::receiverLoop() {
     }
 }
 
-unsigned long PerfectLink::parsePayloadId(const std::string& packetIdStr) {
+unsigned long PerfectLink::parsePacketPayloadId(const std::string& packetIdStr) {
     try {
         unsigned long pktId = std::stoul(packetIdStr);
         return pktId;
@@ -365,18 +378,52 @@ unsigned long PerfectLink::parsePayloadId(const std::string& packetIdStr) {
     return 0;
 }
 
-void PerfectLink::deliverMessages(unsigned long senderId, const std::string& messages) {
+unsigned long PerfectLink::parseMessagePayloadId(const std::string& messageIdStr) {
+    try {
+        unsigned long msgId = std::stoul(messageIdStr);
+        return msgId;
+    } catch (std::invalid_argument&){
+        std::cerr << "Id in message payload was not a number" << std::endl;
+        return 0;
+    } catch (std::out_of_range&) {
+        std::cerr << "Id in message payload was out of range" << std::endl;
+        return 0;
+    }
+    return 0;
+}
+
+bool PerfectLink::deliverMessages(unsigned long senderId, const std::string& messages) { // returns true if it was able to deliver and false otherwise
     size_t start = 0;
     size_t end;
 
     DEBUGLOG("Delivering packet:\n" << messages);
 
     while ((end = messages.find('|', start)) != std::string::npos) {
-        if (deliverCallback_) deliverCallback_(senderId, messages.substr(start, end - start)); // TODO - do they want us to log the ID or the message?
+        if (!deliverMessage(senderId, messages.substr(start, end - start))) {
+            return false; // Something failed delivering this message so fail the whole packet
+        }
         start = end + 1;
     }
     // Last token after the last delimiter
-    if (deliverCallback_) deliverCallback_(senderId, messages.substr(start)); // TODO - do they want us to log the ID or the message?
+    if (!deliverMessage(senderId, messages.substr(start))) {
+        return false; // Something failed delivering this message so fail the whole packet
+    }
+    return true; // All messages successfully delivered
+}
+
+bool PerfectLink::deliverMessage(unsigned long senderId, const std::string& messagePayload) {
+    size_t sep = messagePayload.find(':');
+    if (sep == std::string::npos) {
+        std::cerr << "Incorrect payload format of message" << std::endl;
+        return false;
+    }
+    std::string msgIdStr = messagePayload.substr(0, sep);
+    unsigned long msgId = parseMessagePayloadId(msgIdStr);
+    if (msgId == 0) {
+        return false; // MsgId could not be converted into a unsigned long so message could not be delivered
+    }
+    if (deliverCallback_) deliverCallback_(senderId, msgId);
+    return true;
 }
 
 void PerfectLink::sendAck(in_addr_t destIp, unsigned short destPort, unsigned long msgId) {
@@ -392,14 +439,14 @@ void PerfectLink::handleAck(const unsigned long pktId) {
     }
 }
 
-void PerfectLink::logDelivery(unsigned long senderId, const std::string& message) {
+void PerfectLink::logDelivery(unsigned long senderId, unsigned long messageId) {
     std::ofstream logFile(logPath_.c_str(), std::ios::app);
     if (!logFile.is_open()) {
         std::cerr << "Failed to open log file: " << logPath_ << std::endl;
         return;
     }
 
-    logFile << "d " << senderId << " " << message << "\n";
+    logFile << "d " << senderId << " " << messageId << "\n";
     logFile.close();
 }
 
