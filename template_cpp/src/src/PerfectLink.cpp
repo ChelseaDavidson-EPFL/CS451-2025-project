@@ -21,37 +21,36 @@
 PerfectLink::PerfectLink(unsigned long processId, in_addr_t processIp, unsigned short processPort, unsigned long receiverId, in_addr_t receiverIp, unsigned short receiverPort,std::unordered_map<unsigned short, std::pair<unsigned long, in_addr_t>> hostMapByPort, std::string logPath)
     : processId_(processId), processPort_(processPort), processIp_(processIp), receiverId_(receiverId), receiverIp_(receiverIp), receiverPort_(receiverPort), hostMapByPort_(hostMapByPort), logPath_(logPath), running_(false)
 {
+    // Initialse messages and packets
     packetSeqNumber_ = 0;
     msgSeqNumber_ = 0;
     partialPacket_ = "";
 
+    // Start listening on ports
     if (processId_ == receiverId_) {
         initReceiver();
     } else {
         initBroadcaster();
     }
     
+    // Define a delivery callback - can change this later depending on what needs to happen on delivery
     deliverCallback_ = [this](unsigned long senderId, unsigned long messageId){
         DEBUGLOG("Delivered \"" << messageId << "\" from: " << senderId);
         logDelivery(senderId, messageId);
     };
 
-
-    // Create or overwrite the file
+    // Create or overwrite the log file
     std::ofstream logFile(logPath_.c_str(), std::ios::out);
     if (!logFile.is_open()) {
         std::cerr << "Failed to create log file at: " << logPath_ << std::endl;
         return;
     }
-    
     logFile.close();
-
     DEBUGLOG("Created log file: " << logPath_);
-
 }
 
 PerfectLink::~PerfectLink() {
-    flushMessages();
+    flushMessages(); // TODO - is this allowed?
     stop();
     close(sockfd_);
 }
@@ -75,8 +74,7 @@ void PerfectLink::initBroadcaster() {
         close(sockfd_);
     }
 
-    // Set a receive timeout so recvfrom() won't block indefinitely.
-    // Adjust the timeout as needed (here 100 ms).
+    // Set a receive timeout so recvfrom() in receiverLoop won't block indefinitely.
     struct timeval tv;
     tv.tv_sec = 0;
     tv.tv_usec = 100000; // 100 ms
@@ -85,7 +83,7 @@ void PerfectLink::initBroadcaster() {
     }
 
     running_ = true;
-    receiverThread_ = std::thread(&PerfectLink::receiverLoop, this);
+    receiverThread_ = std::thread(&PerfectLink::receiverLoop, this); // Start listening for ACKs
 
     DEBUGLOG("Initialised " << processId_ << " as a broadcaster");
     DEBUGLOG("Listening for ACKs on port " << processPort_);
@@ -113,7 +111,7 @@ void PerfectLink::initReceiver() {
         close(sockfd_);
     }
 
-    // Set a receive timeout so recvfrom() won't block indefinitely.
+    // Set a receive timeout so recvfrom() in receiverLoop() won't block indefinitely.
     struct timeval tv;
     tv.tv_sec = 0;
     tv.tv_usec = 100000; // 100 ms
@@ -121,20 +119,20 @@ void PerfectLink::initReceiver() {
         perror("setsockopt SO_RCVTIMEO");
     }
 
-    // Initialise the map storing the last missing message ID for each broadcaster process:
-    for (const auto& [port, pairVal] : hostMapByPort_) {
-        unsigned long processId = pairVal.first;
+    // Cleaning logic - initialise the map storing the last missing packet ID for each broadcaster process:
+    for (const auto& [port, hostDetails] : hostMapByPort_) {
+        unsigned long processId = hostDetails.first;
 
         // Skip the receiver’s own process
         if (port == receiverPort_)
             continue;
 
-        // Initialize first missing message to 1
+        // Initialize first missing packet to 1 - waiting for first packet to arrive
         firstMissingPacketId_[processId] = 1;
     }
 
     running_ = true;
-    receiverThread_ = std::thread(&PerfectLink::receiverLoop, this);
+    receiverThread_ = std::thread(&PerfectLink::receiverLoop, this); // Start listening for messages
 
     DEBUGLOG("Listening on port " << receiverPort_ << "...");
     DEBUGLOG("Initialised " << processId_ << " as a receiver");
@@ -146,11 +144,13 @@ void PerfectLink::sendMessage(const std::string& message) {
     std::string messagePayload = std::to_string(msgSeqNumber_) + ":" + message; // Final payload will be pktId|msgId:msg|mgId:msg ...
     
     // Adding message to current packet being built
+    // TODO - do we need locks around partialPacket_?
+    // Check if adding this message would make packet too big
     if (partialPacket_.size() + messagePayload.size() > maxPacketSize_ && partialPacket_.size() > 0) { // TODO - check enough time has past
-        // Store in pending map before adding this message because it will be too big
+        // Add current packet to pending map before adding this message because it will be too big
         addFinishedPacketToPending();
         partialPacket_ = messagePayload;
-    } else {
+    } else { // Packet is not too big so add message to it
         if (partialPacket_.size() == 0) {
             partialPacket_ = messagePayload;
         } else {
@@ -189,19 +189,19 @@ void PerfectLink::addFinishedPacketToPending() {
 void PerfectLink::sendPacketLoop() {
     while (running_) {
         Packet packetToSend;
-        if (!findPacketToSend(packetToSend)) {
+        if (!findPacketToSend(packetToSend)) { // Updating packetToSend with the packet that is ready to be sent // TODO - reuse this logic when parsing ID
             DEBUGLOG("Packets were sent too recently - waiting 10ms");
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
             continue;
         }
 
         std::string payload = std::to_string(packetToSend.id) + "|" + packetToSend.messages;
-        DEBUGLOG("Sending packet id=" << packetToSend.id << " payload: " << packetToSend.messages);
+        DEBUGLOG("Sending packet id:" << packetToSend.id << " messages: " << packetToSend.messages);
         sendRaw(payload, receiverIp_, receiverPort_);
     }
 }
 
-bool PerfectLink::findPacketToSend(Packet& outPacket) {
+bool PerfectLink::findPacketToSend(Packet& outPacket) { // Finds a packet in pending_ that hasn't been sent too recently
     auto now = Clock::now();
     const std::chrono::milliseconds minDelay(200);
 
@@ -212,10 +212,10 @@ bool PerfectLink::findPacketToSend(Packet& outPacket) {
         if (now - pkt.lastSentTime > minDelay) {
             pkt.lastSentTime = now;   // update while holding lock
             outPacket = pkt;          // make a safe copy
-            return true;              // found one
+            return true;
         }
     }
-    return false; // nothing ready
+    return false; // nothing ready to be sent again
 }
 
 void PerfectLink::sendRaw(const std::string& payload, in_addr_t ip, unsigned short port){
