@@ -14,6 +14,7 @@
 // #define DEBUGSEND
 // #define DEBUGRECEIVE
 
+// Debug logging
 #ifdef DEBUGSEND
     #define DEBUGLOGSEND(msg) (std::cout << msg << std::endl)
 #else
@@ -55,7 +56,7 @@ PerfectLink::PerfectLink(unsigned long processId, in_addr_t processIp, unsigned 
         initBroadcaster();
     }
     
-    // Define a delivery callback - can change this later depending on what needs to happen on delivery
+    // Define delivery callback - change this for later assignments
     deliverCallback_ = [this](unsigned long senderId, unsigned long messageId){
         DEBUGLOGRECEIVE("Delivered \"" << messageId << "\" from: " << senderId);
         logDelivery(senderId, messageId);
@@ -76,7 +77,7 @@ void PerfectLink::initBroadcaster() {
     sockfd_ = socket(AF_INET, SOCK_DGRAM, 0);
     if (sockfd_ < 0) { perror("socket"); }
 
-    // Allow address reuse
+    // Allow address reuse - prevent "Address already in use" error when run tests back to back
     int optval = 1;
     setsockopt(sockfd_, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
 
@@ -112,7 +113,7 @@ void PerfectLink::initReceiver() {
     sockfd_ = socket(AF_INET, SOCK_DGRAM, 0);
     if (sockfd_ < 0) { perror("socket");}
 
-    // Allow address reuse
+    // Allow address reuse - prevent "Address already in use" error when run tests back to back
     int optval = 1;
     setsockopt(sockfd_, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
 
@@ -169,7 +170,7 @@ void PerfectLink::sendMessage(const std::string& message) {
 }
 
 void PerfectLink::addMessageToPacket(const std::string& messagePayload) { // Adding message to current packet being built
-    DEBUGLOGSEND("Adding message payload: " << messagePayload << " to pending packet");
+    DEBUGLOGSEND("Adding message payload: " << messagePayload << " to partial packet");
     std::string packetToMove;
 
     // Hold partialPacketMutex 
@@ -206,7 +207,6 @@ void PerfectLink::flushMessages() {
     std::string packetToMove;
     { // Hold partialPacketMutex_ lock
         std::lock_guard<std::mutex> lock(partialPacketMutex_);
-        DEBUGLOGSEND("Was able to lock partialPacketMutex");
         if (!partialPacket_.empty()) {
             packetToMove = partialPacket_;
             partialPacket_.clear();
@@ -220,7 +220,7 @@ void PerfectLink::flushMessages() {
     }
 }
 
-void PerfectLink::addPacketToPending(const std::string &packetStr) {
+void PerfectLink::addPacketToPending(const std::string &packetStr) { //TODO - can optimise with atomic
     if (packetStr.empty()) return;
 
     // lock pending map and assign packet id under that lock
@@ -265,7 +265,7 @@ void PerfectLink::sendPacketLoop() {
 
 bool PerfectLink::findPacketToSend(Packet& outPacket) { // Finds a packet in pending_ that hasn't been sent too recently
     auto now = Clock::now();
-    const std::chrono::milliseconds minDelay(200);
+    const std::chrono::milliseconds minDelay(200); // TODO - can we reduce this number
 
     std::lock_guard<std::mutex> lock(pendingMapMutex_);
 
