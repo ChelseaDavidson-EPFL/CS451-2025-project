@@ -176,27 +176,29 @@ void PerfectLink::addMessageToPacket(const std::string& messagePayload) { // Add
    {
         std::lock_guard<std::mutex> lock(partialPacketMutex_);
 
-        // Check if adding this message would make packet too big
-        if (partialPacket_.size() + messagePayload.size() > maxPacketSize_ && partialPacket_.size() > 0) {
-            DEBUGLOGSEND("Partial packet will be too big if we add message so move current packet out");
-            packetToMove = partialPacket_;          // copy out current partial packet
-            partialPacket_ = messagePayload;       // start new partial packet with this message
+        // Check if it's the first message
+        if (partialPacket_.empty()) {
+            partialPacket_ = messagePayload;
         } else {
-            DEBUGLOGSEND("Partial packet not too big so adding message to it");
-            if (partialPacket_.empty()) {
-                partialPacket_ = messagePayload;
-            } else {
-                partialPacket_ += "|" + messagePayload;
-            }
+            partialPacket_ += "|" + messagePayload;
         }
         lastPacketUpdateTime_ = Clock::now();
+        numMessagesInPacket_ ++;
+
+        DEBUGLOGSEND("Num messages in partial packet is now: " << numMessagesInPacket_);
+
+        // Check if we now have to send the packet
+        if (numMessagesInPacket_ == maxMessagesPerPacket_) {
+            DEBUGLOGSEND("Just addedd the message and partial packet now big enough so flushing");
+            packetToMove = partialPacket_;
+            partialPacket_ = "";
+        }
     } // partialPacketMutex_ released here
 
     // If we copied a packet out, add it to pending now without holding partialPacketMutex_
     if (!packetToMove.empty()) {
         addPacketToPending(packetToMove);
     }
-
 }
 
 void PerfectLink::flushMessages() {
@@ -226,6 +228,7 @@ void PerfectLink::addPacketToPending(const std::string &packetStr) {
     packetSeqNumber_ += 1;
     Packet packet = Packet({packetSeqNumber_, packetStr});
     logSendPacket(packetStr);
+    numMessagesInPacket_ = 0;
     pending_[packet.id] = packet;
     DEBUGLOGSEND("Added packet id=" << packet.id << " to pending. pending_ size=" << pending_.size());
 }
@@ -235,12 +238,12 @@ void PerfectLink::flushPendingPacketIfReady() {
     { // Holding partialPacketMutex_
         std::lock_guard<std::mutex> lock(partialPacketMutex_);
         auto now = Clock::now();
-        DEBUGLOGSEND("Checking if pending packet is ready. Partial packet size: " << partialPacket_.size());
-        if (now - lastPacketUpdateTime_ > maxPacketUpdateTimePast_ || partialPacket_.size() > maxPacketSize_) {
+        DEBUGLOGSEND("Checking if pending packet is ready. Num messages in partial packet is: " << numMessagesInPacket_);
+        if (now - lastPacketUpdateTime_ > maxPacketUpdateTimePast_ || numMessagesInPacket_ >= maxMessagesPerPacket_) {
             DEBUGLOGSEND("Packet is ready so will flush messages");
             shouldFlush = !partialPacket_.empty();
         }
-    }
+    } // Releases lock
     if (shouldFlush) flushMessages(); // flushMessages does copy-and-call safely
 }
 

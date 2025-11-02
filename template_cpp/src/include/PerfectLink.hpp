@@ -46,7 +46,8 @@ private:
     std::string partialPacket_;
     Clock::time_point lastPacketUpdateTime_ = Clock::now(); // So we can finish packet after enough time has past
 
-    const unsigned long maxPacketSize_ = 1000; // Recommend 1500 bytes packet size - left room for elements at the front
+    const unsigned long maxMessagesPerPacket_ = 8;
+    unsigned long numMessagesInPacket_ = 0;
     const std::chrono::milliseconds maxPacketUpdateTimePast_ = std::chrono::milliseconds(500); // 500ms
     std::unordered_map<unsigned long, Packet> pending_;
 
