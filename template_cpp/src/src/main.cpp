@@ -113,7 +113,6 @@ int main(int argc, char **argv) {
       std::string message = std::to_string(i);
       pl.sendMessage(message);
     }
-    pl.flushMessages();
   }
   
   // After a process finishes broadcasting,

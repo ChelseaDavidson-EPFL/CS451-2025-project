@@ -18,7 +18,6 @@ public:
     ~PerfectLink();
 
     void sendMessage(const std::string& message);
-    void flushMessages();
 
 private:
     unsigned long processId_;
@@ -44,10 +43,14 @@ private:
     };
 
     std::string partialPacket_;
-    unsigned long maxPacketSize_ = 1000; // Recommend 1500 bytes packet size - left room for elements at the front
+    Clock::time_point lastPacketUpdateTime_ = Clock::now(); // So we can finish packet after enough time has past
+
+    const unsigned long maxPacketSize_ = 1000; // Recommend 1500 bytes packet size - left room for elements at the front
+    const std::chrono::milliseconds maxPacketUpdateTimePast_ = std::chrono::milliseconds(500); // 500ms
     std::unordered_map<unsigned long, Packet> pending_;
 
-    std::mutex pendingMapMutex;
+    std::mutex pendingMapMutex_;
+    std::mutex partialPacketMutex_;
 
     unsigned long packetSeqNumber_;
     unsigned long msgSeqNumber_;
@@ -57,7 +60,10 @@ private:
 
     void initBroadcaster();
     void initReceiver();
-    void addFinishedPacketToPending();
+    void addMessageToPacket(const std::string& messagePayload);
+    void flushMessages();
+    void addPacketToPending(const std::string &packetStr);
+    void flushPendingPacketIfReady();
     void sendPacketLoop();
     bool findPacketToSend(Packet& packet);
     void sendRaw(const std::string& payload, in_addr_t ip, unsigned short port);
