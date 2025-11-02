@@ -7,6 +7,8 @@
 #include "hello.h"
 #include "PerfectLink.hpp"
 
+PerfectLink* g_pl = nullptr;
+
 
 static void stop(int) {
   // reset signal handlers to default
@@ -20,6 +22,10 @@ static void stop(int) {
 
   // write/flush output file if necessary
   std::cout << "Writing output.\n";
+  if (g_pl) {
+    std::cout << "Stopping PerfectLink and flushing logs...\n";
+    g_pl->stop();
+  }
 
   // exit directly from signal handler
   exit(0);
@@ -66,6 +72,7 @@ int main(int argc, char **argv) {
   in_addr_t processIp = hostMapById[parser.id()].first;
   unsigned short processPort = hostMapById[parser.id()].second;
   PerfectLink pl = PerfectLink(parser.id(), processIp, processPort, configDetails.second, receiverIp, receiverPort, hostMapByPort, parser.outputPath());
+  g_pl = &pl; // Have global reference to perfect link so that you can call stop() when terminate signals are called
 
   std::cout << "Broadcasting and delivering messages...\n\n";
 

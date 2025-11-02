@@ -66,11 +66,6 @@ PerfectLink::PerfectLink(unsigned long processId, in_addr_t processIp, unsigned 
 
 PerfectLink::~PerfectLink() {
     stop();
-    close(sockfd_);
-    if (logFile_.is_open()) {
-        logFile_.flush();
-        logFile_.close();
-    }
 }
 
 void PerfectLink::initBroadcaster() {
@@ -220,15 +215,16 @@ void PerfectLink::flushMessages() {
     }
 }
 
-void PerfectLink::addPacketToPending(const std::string &packetStr) { //TODO - can optimise with atomic
+void PerfectLink::addPacketToPending(const std::string &packetStr) {
     if (packetStr.empty()) return;
-
-    // lock pending map and assign packet id under that lock
-    std::lock_guard<std::mutex> lockPending(pendingMapMutex_);
-    packetSeqNumber_ += 1;
+    
+    packetSeqNumber_ ++;
     Packet packet = Packet({packetSeqNumber_, packetStr});
     logSendPacket(packetStr);
     numMessagesInPacket_ = 0;
+    
+    // lock pending map and assign packet id under that lock
+    std::lock_guard<std::mutex> lockPending(pendingMapMutex_);
     pending_[packet.id] = packet;
     DEBUGLOGSEND("Added packet id=" << packet.id << " to pending. pending_ size=" << pending_.size());
 }
@@ -265,7 +261,7 @@ void PerfectLink::sendPacketLoop() {
 
 bool PerfectLink::findPacketToSend(Packet& outPacket) { // Finds a packet in pending_ that hasn't been sent too recently
     auto now = Clock::now();
-    const std::chrono::milliseconds minDelay(200); // TODO - can we reduce this number
+    const std::chrono::milliseconds minDelay(100);
 
     std::lock_guard<std::mutex> lock(pendingMapMutex_);
 
@@ -507,15 +503,10 @@ void PerfectLink::logDelivery(unsigned long senderId, unsigned long messageId) {
         return;
     }
     logFile_ << "d " << senderId << " " << messageId << "\n";
-    logFile_.flush();
+    if (++writeCounter_ % linesInLogBatch_ == 0) logFile_.flush(); // every 1000 lines
 }
 
 void PerfectLink::logSendPacket(const std::string& packet) {
-    if (!logFile_.is_open()) {
-        std::cerr << "Failed to open log file: " << logPath_ << std::endl;
-        return;
-    }
-
     size_t start = 0;
     size_t end;
     while ((end = packet.find('|', start)) != std::string::npos) {
@@ -525,8 +516,7 @@ void PerfectLink::logSendPacket(const std::string& packet) {
             std::cerr << "Incorrect payload format of message, cannot send packet" << std::endl;
             return;
         }
-        std::string msgIdStr = messagePayload.substr(0, sep);
-        logFile_ << "b " << msgIdStr << "\n";
+        logSendMessage(messagePayload.substr(0, sep));
         start = end + 1;
     }
     // Last token after the last delimiter
@@ -536,16 +526,27 @@ void PerfectLink::logSendPacket(const std::string& packet) {
         std::cerr << "Incorrect payload format of message, cannot send packet" << std::endl;
         return;
     }
-    std::string msgIdStr = messagePayload.substr(0, sep);
-    logFile_ << "b " << msgIdStr << "\n";
-    logFile_.flush();
+    logSendMessage(messagePayload.substr(0, sep));
 }
 
+void PerfectLink::logSendMessage(const std::string& messageId) { 
+    if (!logFile_.is_open()) {
+        std::cerr << "Failed to open log file: " << logPath_ << std::endl;
+        return;
+    }
+    logFile_ << "b " << messageId << "\n";
+    if (++writeCounter_ % linesInLogBatch_ == 0) logFile_.flush(); // every 1000 lines
+}
 
 void PerfectLink::stop() {
     running_ = false;
     if (receiverThread_.joinable()) receiverThread_.join();
     if (resendThread_.joinable()) resendThread_.join();
+    if (logFile_.is_open()) {
+        logFile_.flush();
+        logFile_.close();
+    }
+    close(sockfd_);
     printDelivered();
 }
 

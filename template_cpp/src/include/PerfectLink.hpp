@@ -16,6 +16,7 @@ public:
     PerfectLink(unsigned long processId, in_addr_t processIp, unsigned short processPort, unsigned long receiverId, in_addr_t receiverIp, unsigned short receiverPort, std::unordered_map<unsigned short, std::pair<unsigned long, in_addr_t>> hostMapByPort, std::string logPath);
 
     ~PerfectLink();
+    void stop();
 
     void sendMessage(const std::string& message);
 
@@ -35,27 +36,30 @@ private:
     std::thread receiverThread_;
     std::thread resendThread_;
 
+    size_t writeCounter_ = 0; // To log in batches
+    size_t linesInLogBatch_ = 1000;
+
     using Clock = std::chrono::steady_clock;
 
     struct Packet {
         unsigned long id;
         std::string messages;
-        Clock::time_point lastSentTime = Clock::now() - std::chrono::milliseconds(200); // So that it sends the message immediately in sendMessageLoop
+        Clock::time_point lastSentTime = Clock::now() - std::chrono::milliseconds(100); // So that it sends the message immediately in sendMessageLoop
     };
 
     std::string partialPacket_;
     Clock::time_point lastPacketUpdateTime_ = Clock::now(); // So we can finish packet after enough time has past
 
     const unsigned long maxMessagesPerPacket_ = 8;
-    unsigned long numMessagesInPacket_ = 0;
+    std::atomic<unsigned long> numMessagesInPacket_ = 0;
     const std::chrono::milliseconds maxPacketUpdateTimePast_ = std::chrono::milliseconds(500); // 500ms
     std::unordered_map<unsigned long, Packet> pending_;
 
     std::mutex pendingMapMutex_;
     std::mutex partialPacketMutex_;
 
-    unsigned long packetSeqNumber_;
-    unsigned long msgSeqNumber_;
+    std::atomic<unsigned long> packetSeqNumber_;
+    std::atomic<unsigned long> msgSeqNumber_;
     std::function<void(unsigned long, unsigned long)> deliverCallback_;
     std::map<unsigned long, std::set<unsigned long>> delivered_; // Outer key: processId, Inner pair: message sequence number (id), message content
     std::map<unsigned long, unsigned long> firstMissingPacketId_; // Outer key: processId, Inner value: firstMissingMessage_
@@ -78,6 +82,6 @@ private:
     void handleAck(unsigned long msgId);
     void logDelivery(unsigned long senderId, unsigned long messageId);
     void logSendPacket(const std::string& packet);
-    void stop();
+    void logSendMessage(const std::string& messageId);
     void printDelivered() const;
 };
