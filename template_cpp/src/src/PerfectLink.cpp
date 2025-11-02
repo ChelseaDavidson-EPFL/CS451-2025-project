@@ -50,7 +50,6 @@ PerfectLink::PerfectLink(unsigned long processId, in_addr_t processIp, unsigned 
 }
 
 PerfectLink::~PerfectLink() {
-    flushMessages(); // TODO - is this allowed?
     stop();
     close(sockfd_);
 }
