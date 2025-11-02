@@ -28,6 +28,7 @@ private:
     unsigned short receiverPort_;
     std::unordered_map<unsigned short, std::pair<unsigned long, in_addr_t>> hostMapByPort_; // Port: (processId, ipAddress)
     std::string logPath_;
+    std::ofstream logFile_;
     int sockfd_;
     sockaddr_in localAddr_;
     std::atomic<bool> running_;

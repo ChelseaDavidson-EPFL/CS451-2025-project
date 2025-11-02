@@ -35,6 +35,14 @@
 PerfectLink::PerfectLink(unsigned long processId, in_addr_t processIp, unsigned short processPort, unsigned long receiverId, in_addr_t receiverIp, unsigned short receiverPort,std::unordered_map<unsigned short, std::pair<unsigned long, in_addr_t>> hostMapByPort, std::string logPath)
     : processId_(processId), processPort_(processPort), processIp_(processIp), receiverId_(receiverId), receiverIp_(receiverIp), receiverPort_(receiverPort), hostMapByPort_(hostMapByPort), logPath_(logPath), running_(false)
 {
+    // Create or overwrite the log file
+    logFile_.open(logPath_.c_str(), std::ios::out);
+    if (!logFile_.is_open()) {
+        std::cerr << "Failed to create log file at: " << logPath_ << std::endl;
+        return;
+    }
+    DEBUGLOG("Created log file: " << logPath_);
+
     // Initialse messages and packets
     packetSeqNumber_ = 0;
     msgSeqNumber_ = 0;
@@ -53,19 +61,15 @@ PerfectLink::PerfectLink(unsigned long processId, in_addr_t processIp, unsigned 
         logDelivery(senderId, messageId);
     };
 
-    // Create or overwrite the log file
-    std::ofstream logFile(logPath_.c_str(), std::ios::out);
-    if (!logFile.is_open()) {
-        std::cerr << "Failed to create log file at: " << logPath_ << std::endl;
-        return;
-    }
-    logFile.close();
-    DEBUGLOG("Created log file: " << logPath_);
 }
 
 PerfectLink::~PerfectLink() {
     stop();
     close(sockfd_);
+    if (logFile_.is_open()) {
+        logFile_.flush();
+        logFile_.close();
+    }
 }
 
 void PerfectLink::initBroadcaster() {
@@ -494,20 +498,17 @@ void PerfectLink::handleAck(const unsigned long pktId) {
     }
 }
 
-void PerfectLink::logDelivery(unsigned long senderId, unsigned long messageId) {
-    std::ofstream logFile(logPath_.c_str(), std::ios::app);
-    if (!logFile.is_open()) {
+void PerfectLink::logDelivery(unsigned long senderId, unsigned long messageId) { 
+    if (!logFile_.is_open()) {
         std::cerr << "Failed to open log file: " << logPath_ << std::endl;
         return;
     }
-
-    logFile << "d " << senderId << " " << messageId << "\n";
-    logFile.close();
+    logFile_ << "d " << senderId << " " << messageId << "\n";
+    logFile_.flush();
 }
 
 void PerfectLink::logSendPacket(const std::string& packet) {
-    std::ofstream logFile(logPath_.c_str(), std::ios::app);
-    if (!logFile.is_open()) {
+    if (!logFile_.is_open()) {
         std::cerr << "Failed to open log file: " << logPath_ << std::endl;
         return;
     }
@@ -522,7 +523,7 @@ void PerfectLink::logSendPacket(const std::string& packet) {
             return;
         }
         std::string msgIdStr = messagePayload.substr(0, sep);
-        logFile << "b " << msgIdStr << "\n";
+        logFile_ << "b " << msgIdStr << "\n";
         start = end + 1;
     }
     // Last token after the last delimiter
@@ -533,8 +534,8 @@ void PerfectLink::logSendPacket(const std::string& packet) {
         return;
     }
     std::string msgIdStr = messagePayload.substr(0, sep);
-    logFile << "b " << msgIdStr << "\n";
-    logFile.close();
+    logFile_ << "b " << msgIdStr << "\n";
+    logFile_.flush();
 }
 
 
