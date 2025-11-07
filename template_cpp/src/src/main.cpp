@@ -6,6 +6,7 @@
 #include "parser.hpp"
 #include "hello.h"
 #include "PerfectLink.hpp"
+#include "FifoBroadcast.hpp"
 
 PerfectLink* g_pl = nullptr;
 
