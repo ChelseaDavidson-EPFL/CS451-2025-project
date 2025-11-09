@@ -6,9 +6,8 @@
 #include "parser.hpp"
 #include "hello.h"
 #include "PerfectLink.hpp"
-#include "FifoBroadcast.hpp"
 
-FifoBroadcast* g_fb = nullptr;
+PerfectLink* g_pl = nullptr;
 
 
 static void stop(int) {
@@ -23,9 +22,9 @@ static void stop(int) {
 
   // write/flush output file if necessary
   std::cout << "Writing output.\n";
-  if (g_fb) {
-    std::cout << "Stopping FifoBroadcast and flushing logs...\n";
-    g_fb->stop();
+  if (g_pl) {
+    std::cout << "Stopping PerfectLink and flushing logs...\n";
+    g_pl->stop();
   }
 
   // exit directly from signal handler
@@ -45,6 +44,8 @@ int main(int argc, char **argv) {
 
   hello();
 
+  auto configDetails = parser.configDetailsPerfect();
+  unsigned long receiverId = configDetails.second;
   std::cout << "My ID: " << parser.id() << "\n\n";
 
   // Get host details
@@ -57,6 +58,9 @@ int main(int argc, char **argv) {
     hostMapByPort[host.port] = {host.id, host.ip};
   }
 
+  in_addr_t receiverIp = hostMapById[receiverId].first;
+  unsigned short receiverPort = hostMapById[receiverId].second;
+
   bool idInHosts = hostMapById.count(parser.id()) > 0;
   
   if (!idInHosts) {
@@ -67,18 +71,19 @@ int main(int argc, char **argv) {
 
   in_addr_t processIp = hostMapById[parser.id()].first;
   unsigned short processPort = hostMapById[parser.id()].second;
-  FifoBroadcast fb = FifoBroadcast(parser.id(), hostMapById, hostMapByPort, parser.outputPath());
-  g_fb = &fb; // Have global reference to fifo broadcast so that you can call stop() when terminate signals are called
+  PerfectLink pl = PerfectLink(parser.id(), processIp, processPort, hostMapByPort, hostMapById, parser.outputPath());
+  g_pl = &pl; // Have global reference to perfect link so that you can call stop() when terminate signals are called
 
   std::cout << "Broadcasting and delivering messages...\n\n";
 
-  int numMessages = parser.configDetailsFifo();
+  int numMessages = configDetails.first;
 
-  for (int i = 1; i <= numMessages; ++i) {
-    std::string message = std::to_string(i);
-    fb.broadcast(message);
+  if(parser.id() != configDetails.second) {
+    for (int i = 1; i <= numMessages; ++i) {
+      std::string message = std::to_string(i);
+      pl.sendMessage(message, configDetails.second);
+    }
   }
-  
   
   // After a process finishes broadcasting,
   // it waits forever for the delivery of messages.
