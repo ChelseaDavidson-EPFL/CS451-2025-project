@@ -18,13 +18,7 @@ FifoBroadcast::FifoBroadcast(unsigned long myProcessId, std::unordered_map<unsig
 
     in_addr_t myIp = hostMapById_[myProcessId_].first;
     unsigned short myPort = hostMapById_[myProcessId_].second; 
-    for (const auto& entry : hostMapById_) {
-        unsigned long processId = entry.first;
-        in_addr_t ip = entry.second.first;
-        unsigned short port = entry.second.second; 
-
-        perfectLinkInstances_[processId] = std::make_unique<PerfectLink>(myProcessId_, myIp, myPort, processId, ip, port, hostMapByPort_);
-    }
+    perfectLinkInstance_ = std::make_unique<PerfectLink>(myProcessId_, myIp, myPort, hostMapByPort_, hostMapById_);
 
     // Define delivery callback
     deliverCallback_ = [this](unsigned long senderId, unsigned long messageId){
@@ -41,7 +35,7 @@ FifoBroadcast::~FifoBroadcast() {
 void FifoBroadcast::broadcast(const std::string& message) {
     std::string testMessage = "TEST sent from processId: " + std::to_string(myProcessId_);
     for (const auto& entry : hostMapById_) {
-        perfectLinkInstances_[entry.first] -> sendMessage(testMessage);
+        perfectLinkInstance_ -> sendMessage(testMessage, entry.first);
     }
     // logFile_ << "TEST " << "\n";
 }

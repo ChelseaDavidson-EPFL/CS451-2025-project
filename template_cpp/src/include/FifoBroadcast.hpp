@@ -63,7 +63,7 @@ private:
     unsigned long numProcesses_; // at least NumProcesses/2 + 1 are correct
     std::unordered_map<Message, std::set<unsigned long>> acknowledged_; // Message: [processIdsOfAcks]
 
-    std::unordered_map<unsigned long, std::unique_ptr<PerfectLink>> perfectLinkInstances_; // processId: PerfectLink where processId is the receiver 
+    std::unique_ptr<PerfectLink> perfectLinkInstance_; // processId: PerfectLink where processId is the receiver 
 
     void sendMessageToAllProcesses(Message message);
 };
