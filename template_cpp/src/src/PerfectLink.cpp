@@ -196,8 +196,8 @@ void PerfectLink::addPacketToPending(const std::string &packetStr, unsigned long
     
     // lock pending map and assign packet id under that lock
     std::lock_guard<std::mutex> lockPending(pendingMapMutex_);
-    pending_[packet.id] = packet;
-    DEBUGLOGSEND("Added packet id=" << packet.id << " to pending. pending_ size=" << pending_.size());
+    pending_[receiverId][packet.id] = packet;
+    DEBUGLOGSEND("Added packet id=" << packet.id << " to pending for receiverId: " << receiverId << ". pending_ size for this receiver id is =" << pending_[receiverId].size());
 }
 
 void PerfectLink::flushPendingPacketIfReady(unsigned long receiverId) {
@@ -248,12 +248,21 @@ bool PerfectLink::findPacketToSend(Packet& outPacket) { // Finds a packet in pen
 
     std::lock_guard<std::mutex> lock(pendingMapMutex_);
 
-    for (auto& entry : pending_) {
-        Packet& pkt = entry.second;
-        if (now - pkt.lastSentTime > minDelay) {
-            pkt.lastSentTime = now;   // update while holding lock
-            outPacket = pkt;          // make a safe copy
-            return true;
+    // Loop through outer map
+    for (auto& outerEntry : pending_) {
+        // outerEntry.first is the outer key
+        // outerEntry.second is the inner map
+        auto& innerMap = outerEntry.second;
+
+        // Loop through inner map // TODO - is this going to always prioritise the packets being sent to the lowest processIds?
+        for (auto& innerEntry : innerMap) {
+            Packet& pkt = innerEntry.second;
+
+            if (now - pkt.lastSentTime > minDelay) {
+                pkt.lastSentTime = now;  // update while holding lock
+                outPacket = pkt;         // make a safe copy
+                return true;
+            }
         }
     }
     return false; // nothing ready to be sent again
@@ -300,6 +309,9 @@ void PerfectLink::receiverLoop() {
         buffer[bytes] = '\0';
         std::string payload(buffer);
 
+        unsigned short senderPort = ntohs(senderAddr.sin_port);
+        unsigned long senderId = hostMapByPort_[senderPort].first;
+
         // Extract message type
         if (payload.rfind("ACK:", 0) == 0) {
             std::string pktIdStr = payload.substr(4);
@@ -307,7 +319,7 @@ void PerfectLink::receiverLoop() {
             if (pktId == 0) { // TODO - add more meaningful error
                 continue;
             }
-            handleAck(pktId);
+            handleAck(senderId, pktId); // "senderId" in this case is the process we SENT a message to and has now acknowledged, so they are technically the receiverId
             continue;
         }
 
@@ -325,8 +337,6 @@ void PerfectLink::receiverLoop() {
             continue;
         }
         std::string messages = payload.substr(sep + 1);
-        unsigned short senderPort = ntohs(senderAddr.sin_port);
-        unsigned long senderId = hostMapByPort_[senderPort].first;
         unsigned long firstMissingPacketId = firstMissingPacketId_[senderId];
         DEBUGLOGRECEIVE("Just received (ProcessID, idStr): " << senderId << ", " << id);
 
@@ -467,16 +477,16 @@ bool PerfectLink::deliverMessage(unsigned long senderId, const std::string& mess
     return true;
 }
 
-void PerfectLink::sendAck(in_addr_t destIp, unsigned short destPort, unsigned long msgId) {
-    std::string ack = "ACK:" + std::to_string(msgId);
+void PerfectLink::sendAck(in_addr_t destIp, unsigned short destPort, unsigned long packetId) {
+    std::string ack = "ACK:" + std::to_string(packetId);
     sendRaw(ack, destIp, destPort);
 }
 
-void PerfectLink::handleAck(const unsigned long pktId) {
+void PerfectLink::handleAck(const unsigned long receiverId, const unsigned long pktId) {
     std::lock_guard<std::mutex> lock(pendingMapMutex_); // Destroys and lock and releases mutex when out of scope
-    auto it = pending_.find(pktId);
-    if (it != pending_.end()) {
-        pending_.erase(it);
+    auto it = pending_[receiverId].find(pktId);
+    if (it != pending_[receiverId].end()) {
+        pending_[receiverId].erase(it);
     }
 }
 

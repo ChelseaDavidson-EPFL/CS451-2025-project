@@ -53,7 +53,7 @@ private:
     const unsigned long maxMessagesPerPacket_ = 8;
     std::unordered_map<unsigned long, std::atomic<unsigned long>> numMessagesInPacket_;
     const std::chrono::milliseconds maxPacketUpdateTimePast_ = std::chrono::milliseconds(500); // 500ms
-    std::unordered_map<unsigned long, Packet> pending_; // Packet has a receiverId so each packet can go to a different receiver process
+    std::unordered_map<unsigned long, std::unordered_map<unsigned long, Packet>> pending_; // [receiverId][packetId]: Packet
 
     std::mutex pendingMapMutex_;
     std::mutex partialPacketMutex_;
@@ -79,7 +79,7 @@ private:
     bool deliverMessages(unsigned long senderId, const std::string& messages);
     bool deliverMessage(unsigned long senderId, const std::string& messagePayload);
     void sendAck(in_addr_t destIp, unsigned short destPort, unsigned long packetId);
-    void handleAck(unsigned long msgId);
+    void handleAck(const unsigned long receiverId, const unsigned long pktId);
     void logDelivery(unsigned long senderId, unsigned long messageId);
     void logSendPacket(const std::string& packet);
     void logSendMessage(const std::string& messageId);
