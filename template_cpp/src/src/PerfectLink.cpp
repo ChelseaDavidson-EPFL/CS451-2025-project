@@ -10,7 +10,7 @@
 #include "PerfectLink.hpp"
 
 // TODO - ************ TURN THIS OFF BEFORE SUBMISSION ****************
-// #define DEBUG
+#define DEBUG
 // #define DEBUGSEND
 // #define DEBUGRECEIVE
 

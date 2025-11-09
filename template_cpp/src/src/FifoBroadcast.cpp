@@ -35,9 +35,12 @@ FifoBroadcast::~FifoBroadcast() {
 void FifoBroadcast::broadcast(const std::string& message) {
     std::string testMessage = "TEST sent from processId: " + std::to_string(myProcessId_);
     for (const auto& entry : hostMapById_) {
-        perfectLinkInstance_ -> sendMessage(testMessage, entry.first);
+        unsigned long processId = entry.first;
+        if (processId == myProcessId_) { // Skip itself
+            continue;
+        }
+        perfectLinkInstance_ -> sendMessage(testMessage, processId);
     }
-    // logFile_ << "TEST " << "\n";
 }
 
 
