@@ -2,8 +2,8 @@
 
 #include "FifoBroadcast.hpp"
 
-FifoBroadcast::FifoBroadcast(std::string logPath)
-    : logPath_(logPath), running_(false)
+FifoBroadcast::FifoBroadcast(std::unordered_map<unsigned long, std::pair<in_addr_t, unsigned short>> hostMapById, std::string logPath)
+    : hostMapById_(hostMapById), logPath_(logPath), running_(false)
 {
     // Create or overwrite the log file
     logFile_.open(logPath_.c_str(), std::ios::out);
@@ -12,6 +12,9 @@ FifoBroadcast::FifoBroadcast(std::string logPath)
         return;
     }
     // DEBUGLOG("Created log file: " << logPath_);
+
+    // Initialise vars:
+    numProcesses_ = hostMapById.size();
 
     // Define delivery callback
     deliverCallback_ = [this](unsigned long senderId, unsigned long messageId){
