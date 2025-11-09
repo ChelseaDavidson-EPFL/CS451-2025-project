@@ -67,7 +67,7 @@ int main(int argc, char **argv) {
 
   in_addr_t processIp = hostMapById[parser.id()].first;
   unsigned short processPort = hostMapById[parser.id()].second;
-  FifoBroadcast fb = FifoBroadcast(hostMapById, parser.outputPath());
+  FifoBroadcast fb = FifoBroadcast(parser.id(), hostMapById, hostMapByPort, parser.outputPath());
   g_fb = &fb; // Have global reference to fifo broadcast so that you can call stop() when terminate signals are called
 
   std::cout << "Broadcasting and delivering messages...\n\n";

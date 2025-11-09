@@ -13,7 +13,7 @@
 
 class PerfectLink {
 public:
-    PerfectLink(unsigned long processId, in_addr_t processIp, unsigned short processPort, unsigned long receiverId, in_addr_t receiverIp, unsigned short receiverPort, std::unordered_map<unsigned short, std::pair<unsigned long, in_addr_t>> hostMapByPort, std::string logPath);
+    PerfectLink(unsigned long processId, in_addr_t processIp, unsigned short processPort, unsigned long receiverId, in_addr_t receiverIp, unsigned short receiverPort, std::unordered_map<unsigned short, std::pair<unsigned long, in_addr_t>> hostMapByPort, std::string logPath = "");
 
     ~PerfectLink();
     void stop();
@@ -30,6 +30,7 @@ private:
     std::unordered_map<unsigned short, std::pair<unsigned long, in_addr_t>> hostMapByPort_; // Port: (processId, ipAddress)
     std::string logPath_;
     std::ofstream logFile_;
+    bool loggingToFile_ = true;
     int sockfd_;
     sockaddr_in localAddr_;
     std::atomic<bool> running_;

@@ -8,6 +8,8 @@
 #include <map>
 #include <set>
 
+#include "PerfectLink.hpp"
+
 struct Message {
     unsigned long processId;
     unsigned long messageId;
@@ -42,14 +44,16 @@ namespace std {
 
 class FifoBroadcast {
 public:
-    FifoBroadcast(std::unordered_map<unsigned long, std::pair<in_addr_t, unsigned short>> hostMapById, std::string logPath);
+    FifoBroadcast(unsigned long myProcessId, std::unordered_map<unsigned long, std::pair<in_addr_t, unsigned short>> hostMapById, std::unordered_map<unsigned short, std::pair<unsigned long, in_addr_t>> hostMapByPort, std::string logPath);
 
     ~FifoBroadcast();
     void stop();
     void broadcast(const std::string& message);
 
 private:
+    unsigned long myProcessId_;
     std::unordered_map<unsigned long, std::pair<in_addr_t, unsigned short>> hostMapById_;
+    std::unordered_map<unsigned short, std::pair<unsigned long, in_addr_t>> hostMapByPort_;
     std::string logPath_;
     std::atomic<bool> running_;
     std::ofstream logFile_;
@@ -58,4 +62,8 @@ private:
     std::set<Message> pendingDelivery_;  // messages ordered first by processId then by messageId // TODO - this will probably have to change
     unsigned long numProcesses_; // at least NumProcesses/2 + 1 are correct
     std::unordered_map<Message, std::set<unsigned long>> acknowledged_; // Message: [processIdsOfAcks]
+
+    std::unordered_map<unsigned long, std::unique_ptr<PerfectLink>> perfectLinkInstances_; // processId: PerfectLink where processId is the receiver 
+
+    void sendMessageToAllProcesses(Message message);
 };

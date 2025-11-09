@@ -10,7 +10,7 @@
 #include "PerfectLink.hpp"
 
 // TODO - ************ TURN THIS OFF BEFORE SUBMISSION ****************
-// #define DEBUG
+#define DEBUG
 // #define DEBUGSEND
 // #define DEBUGRECEIVE
 
@@ -37,12 +37,18 @@ PerfectLink::PerfectLink(unsigned long processId, in_addr_t processIp, unsigned 
     : processId_(processId), processPort_(processPort), processIp_(processIp), receiverId_(receiverId), receiverIp_(receiverIp), receiverPort_(receiverPort), hostMapByPort_(hostMapByPort), logPath_(logPath), running_(false)
 {
     // Create or overwrite the log file
-    logFile_.open(logPath_.c_str(), std::ios::out);
-    if (!logFile_.is_open()) {
-        std::cerr << "Failed to create log file at: " << logPath_ << std::endl;
-        return;
+    if (logPath_ == "") {
+        std::cout << "Not logging to file" << std::endl;
+        loggingToFile_ = false;
     }
-    DEBUGLOG("Created log file: " << logPath_);
+    if (loggingToFile_) {
+        logFile_.open(logPath_.c_str(), std::ios::out);
+        if (!logFile_.is_open()) {
+            std::cerr << "Failed to create log file at: " << logPath_ << std::endl;
+            loggingToFile_ = false;
+        }
+        DEBUGLOG("Created log file: " << logPath_);
+    }
 
     // Initialse messages and packets
     packetSeqNumber_ = 0;
@@ -58,7 +64,7 @@ PerfectLink::PerfectLink(unsigned long processId, in_addr_t processIp, unsigned 
     
     // Define delivery callback - change this for later assignments
     deliverCallback_ = [this](unsigned long senderId, unsigned long messageId){
-        DEBUGLOGRECEIVE("Delivered \"" << messageId << "\" from: " << senderId);
+        DEBUGLOG("Delivered \"" << messageId << "\" from: " << senderId);
         logDelivery(senderId, messageId);
     };
 
@@ -152,6 +158,7 @@ void PerfectLink::initReceiver() {
 }
 
 void PerfectLink::sendMessage(const std::string& message) {
+    DEBUGLOG("Sending message " << message);
     // Add messageId to message payload
     msgSeqNumber_++;
     std::string messagePayload = std::to_string(msgSeqNumber_) + ":" + message; // Final payload will be pktId|msgId:msg|mgId:msg ...
@@ -498,6 +505,9 @@ void PerfectLink::handleAck(const unsigned long pktId) {
 }
 
 void PerfectLink::logDelivery(unsigned long senderId, unsigned long messageId) { 
+    if (!loggingToFile_) {
+        return;
+    }
     if (!logFile_.is_open()) {
         std::cerr << "Failed to open log file: " << logPath_ << std::endl;
         return;
@@ -530,6 +540,9 @@ void PerfectLink::logSendPacket(const std::string& packet) {
 }
 
 void PerfectLink::logSendMessage(const std::string& messageId) { 
+    if (!loggingToFile_) {
+        return;
+    }
     if (!logFile_.is_open()) {
         std::cerr << "Failed to open log file: " << logPath_ << std::endl;
         return;
@@ -542,7 +555,7 @@ void PerfectLink::stop() {
     running_ = false;
     if (receiverThread_.joinable()) receiverThread_.join();
     if (resendThread_.joinable()) resendThread_.join();
-    if (logFile_.is_open()) {
+    if (loggingToFile_ && logFile_.is_open()) {
         logFile_.flush();
         logFile_.close();
     }
