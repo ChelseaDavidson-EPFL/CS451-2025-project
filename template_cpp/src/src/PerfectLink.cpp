@@ -72,9 +72,9 @@ PerfectLink::PerfectLink(unsigned long myProcessId, in_addr_t myProcessIp, unsig
     initReceiverBroadcaster();
     
     // Define delivery callback - change this for later assignments
-    deliverCallback_ = [this](unsigned long senderId, unsigned long messageId){
-        DEBUGLOG("Delivered \"" << messageId << "\" from: " << senderId);
-        logDelivery(senderId, messageId);
+    deliverCallback_ = [this](Message message, unsigned long senderId){
+        DEBUGLOG("Delivered \"" << message.messageId << "\" from: " << senderId);
+        logDelivery(message.origSenderId, message.messageId);
     };
 
 }
@@ -483,7 +483,10 @@ bool PerfectLink::deliverMessage(unsigned long senderId, const std::string& mess
     if (msgId == 0) {
         return false; // MsgId could not be converted into a unsigned long so message could not be delivered
     }
-    if (deliverCallback_) deliverCallback_(origSenderId, msgId);
+    if (deliverCallback_) {
+        Message messageToDeliver{origSenderId, msgId, remainingMsgPayload.substr(sep2+1)};
+        deliverCallback_(messageToDeliver, senderId);
+    }
     return true;
 }
 

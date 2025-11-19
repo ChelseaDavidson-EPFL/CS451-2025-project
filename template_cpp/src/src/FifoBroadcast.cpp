@@ -38,21 +38,51 @@ void FifoBroadcast::broadcast(const std::string& message) {
     // Add this message to the pending list for this process:
     unsigned long msgId = ++msgSeqNumber_;
     Message pendingMessage{myProcessId_, msgId, message};
+    pendingDelivery_.insert(pendingMessage);
+    sendMessageToAllProcesses(pendingMessage);
+}
 
+
+void FifoBroadcast::sendMessageToAllProcesses(const Message& message) {
     for (const auto& entry : hostMapById_) {
         unsigned long processId = entry.first;
-        if (processId == myProcessId_) { // Skip itself
+        if (processId == myProcessId_) { // Skip itself - TODO - idk if this is correct
             continue;
         }
-        perfectLinkInstance_ -> sendMessage(pendingMessage, processId);
+        perfectLinkInstance_ -> sendMessage(message, processId);
     }
 }
 
+void FifoBroadcast::receivedMessage(const Message& message, const unsigned long& senderId) {
+    if (haveDelivered(message)) { // Don't want to waste time on something we've already delivered
+      return; 
+    }
+    pendingDelivery_.insert(message); // Only inserts if it wasn't already in there
+    acknowledged_[message].insert(senderId); // The sender ID has acknowledged this message by sending it to us
 
-void FifoBroadcast::sendMessageToAllProcesses(Message message) {
-
+    if (canDeliver(message)) {
+        deliverMessage(message);
+    }
 }
 
+void FifoBroadcast::deliverMessage(Message message) {
+    if (haveDelivered(message)) {
+      return; // Don't want to deliver again
+    }
+    // Remove it from pending delivery
+    pendingDelivery_.erase(message);
+    // Rebroadcast
+    sendMessageToAllProcesses(message);
+}
+
+bool FifoBroadcast::haveDelivered(Message message) {
+    return (delivered_.find(message) != delivered_.end());
+}
+
+bool FifoBroadcast::canDeliver(Message message) {
+    // If received acknowledgement from over half of processes we can deliver
+    return acknowledged_[message].size() > numProcesses_ / 2;
+}
 
 void FifoBroadcast::stop() {
     running_ = false;

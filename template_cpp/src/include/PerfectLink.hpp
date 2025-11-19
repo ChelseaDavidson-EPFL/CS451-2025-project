@@ -90,7 +90,7 @@ private:
     std::mutex partialPacketMutex_;
 
     std::unordered_map<unsigned long, std::atomic<unsigned long>> packetSeqNumber_; // receiverId, seqNum
-    std::function<void(unsigned long, unsigned long)> deliverCallback_;
+    std::function<void(Message, unsigned long)> deliverCallback_;
     std::map<unsigned long, std::set<unsigned long>> delivered_; // Outer key: senderId, Inner pair: message sequence number (id), message content
     std::map<unsigned long, unsigned long> firstMissingPacketId_; // Outer key: senderId, Inner value: firstMissingMessage_
 
