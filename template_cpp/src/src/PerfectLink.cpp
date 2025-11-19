@@ -60,7 +60,6 @@ PerfectLink::PerfectLink(unsigned long myProcessId, in_addr_t myProcessIp, unsig
         // Sender logic - this process behaving as a sender
         packetSeqNumber_[processId] = 0;
         numMessagesInPacket_[processId] = 0;
-        msgSeqNumber_[processId] = 0;
         partialPacket_[processId] = "";
         lastPacketUpdateTime_[processId] = Clock::now();
 
@@ -120,11 +119,10 @@ void PerfectLink::initReceiverBroadcaster() {
     DEBUGLOG("Initialised " << myProcessId_ << " as a receiver/ broadcaster");
 }
 
-void PerfectLink::sendMessage(const std::string& message, unsigned long receiverId) {
-    DEBUGLOG("Sending message " << message);
+void PerfectLink::sendMessage(const Message& message, unsigned long receiverId) {
+    DEBUGLOG("Sending message " << message.content);
     // Add messageId to message payload
-    msgSeqNumber_[receiverId]++; // TODO - handle it not being in our list
-    std::string messagePayload = std::to_string(msgSeqNumber_[receiverId]) + ":" + message; // Final payload will be pktId|msgId:msg|mgId:msg ...
+    std::string messagePayload = std::to_string(message.origSenderId) + "-" + std::to_string(message.messageId) + ":" + message.content; // Final payload will be pktId|sendId-msgId:msg|sendId-mgId:msg ...
     addMessageToPacket(messagePayload, receiverId);
     
     // Start resend thread if not already running
@@ -463,17 +461,29 @@ bool PerfectLink::deliverMessages(unsigned long senderId, const std::string& mes
 }
 
 bool PerfectLink::deliverMessage(unsigned long senderId, const std::string& messagePayload) {
-    size_t sep = messagePayload.find(':');
+    // Getting the originalSenderId
+    size_t sep = messagePayload.find('-');
     if (sep == std::string::npos) {
         std::cerr << "Incorrect payload format of message" << std::endl;
         return false;
     }
-    std::string msgIdStr = messagePayload.substr(0, sep);
+    std::string origSenderIdStr = messagePayload.substr(0, sep);
+    unsigned long origSenderId = parseMessagePayloadId(origSenderIdStr);
+    if (origSenderId == 0) {
+        return false; // origSenderId could not be converted into a unsigned long so message could not be delivered
+    }
+    std::string remainingMsgPayload = messagePayload.substr(sep + 1);
+    size_t sep2 = remainingMsgPayload.find(':');
+    if (sep2 == std::string::npos) {
+        std::cerr << "Incorrect payload format of message" << std::endl;
+        return false;
+    }
+    std::string msgIdStr = remainingMsgPayload.substr(0, sep2);
     unsigned long msgId = parseMessagePayloadId(msgIdStr);
     if (msgId == 0) {
         return false; // MsgId could not be converted into a unsigned long so message could not be delivered
     }
-    if (deliverCallback_) deliverCallback_(senderId, msgId);
+    if (deliverCallback_) deliverCallback_(origSenderId, msgId);
     return true;
 }
 

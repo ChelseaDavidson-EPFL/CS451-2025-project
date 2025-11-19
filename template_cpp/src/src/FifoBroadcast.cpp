@@ -15,6 +15,7 @@ FifoBroadcast::FifoBroadcast(unsigned long myProcessId, std::unordered_map<unsig
 
     // Initialise vars:
     numProcesses_ = hostMapById.size();
+    msgSeqNumber_ = 0;
 
     in_addr_t myIp = hostMapById_[myProcessId_].first;
     unsigned short myPort = hostMapById_[myProcessId_].second; 
@@ -26,6 +27,7 @@ FifoBroadcast::FifoBroadcast(unsigned long myProcessId, std::unordered_map<unsig
         // logDelivery(senderId, messageId);
     };
 
+
 }
 
 FifoBroadcast::~FifoBroadcast() {
@@ -33,13 +35,16 @@ FifoBroadcast::~FifoBroadcast() {
 }
 
 void FifoBroadcast::broadcast(const std::string& message) {
-    std::string testMessage = "TEST sent from processId: " + std::to_string(myProcessId_);
+    // Add this message to the pending list for this process:
+    unsigned long msgId = ++msgSeqNumber_;
+    Message pendingMessage{myProcessId_, msgId, message};
+
     for (const auto& entry : hostMapById_) {
         unsigned long processId = entry.first;
         if (processId == myProcessId_) { // Skip itself
             continue;
         }
-        perfectLinkInstance_ -> sendMessage(testMessage, processId);
+        perfectLinkInstance_ -> sendMessage(pendingMessage, processId);
     }
 }
 
