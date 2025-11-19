@@ -535,7 +535,7 @@ void PerfectLink::logSendPacket(const std::string& packet) { // TODO - probably 
     logSendMessage(messagePayload.substr(0, sep));
 }
 
-void PerfectLink::logSendMessage(const std::string& messageId) { 
+void PerfectLink::logSendMessage(const std::string& messageIds) { 
     if (!loggingToFile_) {
         return;
     }
@@ -543,6 +543,13 @@ void PerfectLink::logSendMessage(const std::string& messageId) {
         std::cerr << "Failed to open log file: " << logPath_ << std::endl;
         return;
     }
+    size_t sep = messageIds.find('-');
+    if (sep == std::string::npos) {
+        std::cerr << "Incorrect payload format of message, cannot send packet" << std::endl;
+        return;
+    }
+    std::string messageId = messageIds.substr(sep+1); // First value is the originalSenderId, second value is the msgId
+
     logFile_ << "b " << messageId << "\n";
     if (++writeCounter_ % linesInLogBatch_ == 0) logFile_.flush(); // every 1000 lines
 }

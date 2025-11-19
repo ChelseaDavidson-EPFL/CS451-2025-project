@@ -112,6 +112,6 @@ private:
     void handleAck(const unsigned long receiverId, const unsigned long pktId);
     void logDelivery(unsigned long senderId, unsigned long messageId);
     void logSendPacket(const std::string& packet);
-    void logSendMessage(const std::string& messageId);
+    void logSendMessage(const std::string& messageIds);
     void printDelivered() const;
 };
