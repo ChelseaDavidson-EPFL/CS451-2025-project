@@ -34,10 +34,20 @@ private:
     std::set<Message> delivered_;
     std::unique_ptr<PerfectLink> perfectLinkInstance_; // processId: PerfectLink where processId is the receiver 
 
+    // Logging vars
+    size_t writeCounter_ = 0; // To log in batches
+    size_t linesInLogBatch_ = 1000;
+
     void sendMessageToAllProcesses(const Message& message);
     void receivedMessage(const Message& message, const unsigned long& senderId);
     void deliverMessage(Message message);
     bool haveDelivered(Message message);
     bool canDeliver(Message message);
+
+    void logBroadcast(unsigned long messageId);
+    void logDelivery(Message message);
+
+    void printDelivered() const;
+    void printAcknowledged() const;
 
 };

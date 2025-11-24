@@ -49,6 +49,7 @@ public:
     ~PerfectLink();
     void stop();
 
+    void setDeliverCallback(std::function<void(Message, unsigned long)> cb);
     void sendMessage(const Message& message, unsigned long receiverId);
 
 private:

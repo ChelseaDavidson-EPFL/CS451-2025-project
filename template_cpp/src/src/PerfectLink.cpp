@@ -10,7 +10,7 @@
 #include "PerfectLink.hpp"
 
 // TODO - ************ TURN THIS OFF BEFORE SUBMISSION ****************
-#define DEBUG
+// #define DEBUG
 // #define DEBUGSEND
 // #define DEBUGRECEIVE
 
@@ -71,16 +71,20 @@ PerfectLink::PerfectLink(unsigned long myProcessId, in_addr_t myProcessIp, unsig
     // Start listening on ports
     initReceiverBroadcaster();
     
-    // Define delivery callback - change this for later assignments
-    deliverCallback_ = [this](Message message, unsigned long senderId){
-        DEBUGLOG("Delivered \"" << message.messageId << "\" from: " << senderId);
-        logDelivery(message.origSenderId, message.messageId);
-    };
+    // // Define delivery callback - change this for later assignments
+    // deliverCallback_ = [this](Message message, unsigned long senderId){
+    //     DEBUGLOG("Delivered \"" << message.messageId << "\" from: " << senderId);
+    //     logDelivery(message.origSenderId, message.messageId);
+    // };
 
 }
 
 PerfectLink::~PerfectLink() {
     stop();
+}
+
+void PerfectLink::setDeliverCallback(std::function<void(Message, unsigned long)> cb) {
+    deliverCallback_ = cb;
 }
 
 
@@ -120,7 +124,7 @@ void PerfectLink::initReceiverBroadcaster() {
 }
 
 void PerfectLink::sendMessage(const Message& message, unsigned long receiverId) {
-    DEBUGLOG("Sending message " << message.content);
+    DEBUGLOG("Sending message " << message.messageId << " to process " << receiverId);
     // Add messageId to message payload
     std::string messagePayload = std::to_string(message.origSenderId) + "-" + std::to_string(message.messageId) + ":" + message.content; // Final payload will be pktId|sendId-msgId:msg|sendId-mgId:msg ...
     addMessageToPacket(messagePayload, receiverId);

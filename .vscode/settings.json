@@ -70,6 +70,7 @@
         "mutex": "cpp",
         "deque": "cpp",
         "queue": "cpp",
-        "set": "cpp"
+        "set": "cpp",
+        "cerrno": "cpp"
     }
 }
