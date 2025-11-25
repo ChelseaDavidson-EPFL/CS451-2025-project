@@ -29,7 +29,7 @@ def main():
             pid = int(line.split()[0])
             hosts.append(pid)
 
-    # --- Expected global events ---
+    # --- Expected sets ---
     expected_broadcasts = {m for m in range(1, M + 1)}
 
     expected_deliveries = set()
@@ -39,13 +39,13 @@ def main():
 
     overall_passed = True
 
-    # --- Check each process ---
+    # --- Validate each process ---
     for pid in hosts:
         print(f"\n=== Checking process {pid} ===")
 
         output_file = logs_folder / f"proc{pid:02d}.output"
         if not output_file.exists():
-            print(f"❌ Missing log file: {output_file}")
+            print(f"❌ Missing log: {output_file}")
             overall_passed = False
             continue
 
@@ -64,27 +64,17 @@ def main():
                         print(f"❌ Invalid broadcast line: '{line}'")
                         overall_passed = False
                         continue
-                    try:
-                        msg_id = int(parts[1])
-                        broadcasted.append(msg_id)
-                    except ValueError:
-                        print(f"❌ Invalid broadcast message id in: '{line}'")
-                        overall_passed = False
+                    broadcasted.append(int(parts[1]))
 
                 elif parts[0] == "d":
                     if len(parts) != 3:
                         print(f"❌ Invalid delivery line: '{line}'")
                         overall_passed = False
                         continue
-                    try:
-                        sender = int(parts[1])
-                        msg_id = int(parts[2])
-                        delivered.append((sender, msg_id))
-                    except ValueError:
-                        print(f"❌ Invalid delivery line: '{line}'")
-                        overall_passed = False
+                    delivered.append((int(parts[1]), int(parts[2])))
+
                 else:
-                    print(f"❌ Invalid line prefix: '{line}'")
+                    print(f"❌ Invalid line: '{line}'")
                     overall_passed = False
 
         broadcast_set = set(broadcasted)
@@ -93,49 +83,55 @@ def main():
         passed = True
 
         # --- Broadcast checks ---
-        missing_b = expected_broadcasts - broadcast_set
-        extra_b = broadcast_set - expected_broadcasts
+        if broadcast_set != expected_broadcasts:
+            missing_b = expected_broadcasts - broadcast_set
+            extra_b = broadcast_set - expected_broadcasts
 
-        if missing_b:
-            print("❌ Missing broadcast messages:")
-            for m in sorted(missing_b):
-                print(f"   Missing: b {m}")
-            passed = False
-
-        if extra_b:
-            print("❌ Unexpected broadcast messages:")
-            for m in sorted(extra_b):
-                print(f"   Unexpected: b {m}")
+            if missing_b:
+                print("❌ Missing broadcasts:", sorted(missing_b))
+            if extra_b:
+                print("❌ Unexpected broadcasts:", sorted(extra_b))
             passed = False
 
         # --- Delivery checks ---
         if len(delivered) != len(delivered_set):
-            print("❌ Duplicate delivered messages detected.")
+            print("❌ Duplicate delivered messages found.")
             duplicates = {msg for msg in delivered if delivered.count(msg) > 1}
             print("   Duplicates:", duplicates)
             passed = False
 
         missing_d = expected_deliveries - delivered_set
         if missing_d:
-            print("❌ Missing delivered messages:")
+            print("❌ Missing deliveries:")
             for sender, msg in sorted(missing_d):
                 print(f"   Missing: d {sender} {msg}")
             passed = False
 
         extra_d = delivered_set - expected_deliveries
         if extra_d:
-            print("❌ Unexpected delivered messages:")
+            print("❌ Unexpected deliveries:")
             for sender, msg in sorted(extra_d):
                 print(f"   Unexpected: d {sender} {msg}")
             passed = False
 
+        # --- FIFO check per sender ---
+        deliveries_by_sender = {}
+        for sender, msg in delivered:
+            deliveries_by_sender.setdefault(sender, []).append(msg)
+
+        for sender, msg_list in deliveries_by_sender.items():
+            if msg_list != sorted(msg_list):
+                print(f"❌ FIFO violation for sender {sender}:")
+                print(f"   Delivered: {msg_list}")
+                print(f"   Expected:  {sorted(msg_list)}")
+                passed = False
+
         if passed:
-            print(f"✅ Process {pid} passed ✔️")
+            print(f"✅ Process {pid} passed FIFO + reliability tests.")
         else:
-            print(f"❌ Process {pid} FAILED")
+            print(f"❌ Process {pid} FAILED.")
             overall_passed = False
 
-    # --- Final summary ---
     print("\n=== OVERALL RESULT ===")
     if overall_passed:
         print("✅ All processes passed.")

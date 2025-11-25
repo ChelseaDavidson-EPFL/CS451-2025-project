@@ -32,22 +32,29 @@ private:
     unsigned long numProcesses_; // at least NumProcesses/2 + 1 are correct
     std::unordered_map<Message, std::set<unsigned long>> acknowledged_; // Message: [processIdsOfAcks]
     std::set<Message> delivered_;
+    std::unordered_map<unsigned long, unsigned long> nextExpectedMsgId_;   // nextExpectedMsgId_[p] = smallest messageId not yet delivered from process p
     std::unique_ptr<PerfectLink> perfectLinkInstance_; // processId: PerfectLink where processId is the receiver 
 
     // Logging vars
     size_t writeCounter_ = 0; // To log in batches
     size_t linesInLogBatch_ = 1000;
 
+    // Concurrency primitives
+    std::mutex stateMutex_;   // protects pendingDelivery_, acknowledged_, delivered_, nextExpectedMsgId_
+    std::mutex logMutex_;     // protects logFile_ writes / std::cout multi-part output
+
     void sendMessageToAllProcesses(const Message& message);
     void receivedMessage(const Message& message, const unsigned long& senderId);
     void deliverMessage(Message message);
     bool haveDelivered(Message message);
-    bool canDeliver(Message message);
+    bool canDeliver(const Message &m);
+    void tryDeliverPending();
 
     void logBroadcast(unsigned long messageId);
     void logDelivery(Message message);
 
-    void printDelivered() const;
-    void printAcknowledged() const;
+    void printDelivered();
+    void printPending();
+    void printAcknowledged();
 
 };

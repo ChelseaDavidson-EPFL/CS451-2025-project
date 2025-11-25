@@ -1,11 +1,13 @@
 #include <iostream>
+#include <sstream>
+#include <vector>
 
 #include "FifoBroadcast.hpp"
 
 // TODO - ************ TURN THIS OFF BEFORE SUBMISSION ****************
 // #define DEBUG
 // #define DEBUGBROADCAST
-// #define DEBUGRECEIVE
+#define DEBUGRECEIVE
 
 // Debug logging
 #ifdef DEBUGBROADCAST
@@ -41,6 +43,9 @@ FifoBroadcast::FifoBroadcast(unsigned long myProcessId, std::unordered_map<unsig
     // Initialise vars:
     numProcesses_ = hostMapById.size();
     msgSeqNumber_ = 0;
+    for (auto &[pid, _] : hostMapById_) {
+        nextExpectedMsgId_[pid] = 1;
+    }
 
     in_addr_t myIp = hostMapById_[myProcessId_].first;
     unsigned short myPort = hostMapById_[myProcessId_].second; 
@@ -90,6 +95,9 @@ void FifoBroadcast::receivedMessage(const Message& message, const unsigned long&
     acknowledged_[message].insert(senderId); // The sender ID has acknowledged this message by sending it to us
 
     auto [it, inserted] = pendingDelivery_.insert(message); // Only inserts if it wasn't already in there
+    DEBUGLOGRECEIVE("Added received message to pending. Pending is now:");
+    printPending();
+
     // Rebroadcast if it's the first time we're seeing it
     if (inserted) { // Means message wasn't in pendingDelivery_
         sendMessageToAllProcesses(message);
@@ -107,26 +115,78 @@ void FifoBroadcast::deliverMessage(Message message) {
     if (haveDelivered(message)) {
       return; // Don't want to deliver again
     }
+    DEBUGLOGRECEIVE("Delivering  (" << message.origSenderId << ", " << message.messageId << "):");
+
     // Add it to our delivered:
     delivered_.insert(message);
+
+    // update next expected id for that sender
+    nextExpectedMsgId_[message.origSenderId]++;
+    DEBUGLOGRECEIVE("Next expected message ID is now: " << nextExpectedMsgId_[message.origSenderId]);
+
     // Remove it from pending delivery
     pendingDelivery_.erase(message);
+    DEBUGLOGRECEIVE("Just delivered a message so removing it from pending. Pending now: ");
+    printPending();
+
+
     // Debug
     DEBUGLOGRECEIVE("Just delivered a message so adding it to delivered. Delivered now: ");
     printDelivered();
+
     // Log the send:
-    logDelivery(message);
-   
+    logDelivery(message);    
+
+    // also try to deliver other now-unblocked messages
+    tryDeliverPending();   
 }
 
 bool FifoBroadcast::haveDelivered(Message message) {
     return (delivered_.find(message) != delivered_.end());
 }
 
-bool FifoBroadcast::canDeliver(Message message) {
-    // If received acknowledgement from over half of processes we can deliver
-    return acknowledged_[message].size() > numProcesses_ / 2;
+bool FifoBroadcast::canDeliver(const Message &m) {
+    unsigned long p = m.origSenderId;
+    unsigned long id = m.messageId;
+
+    DEBUGLOGRECEIVE("Checking if we can deliver  (" << p  << ", " << id << "):");
+
+    // (1) URB condition - If received acknowledgement from over half of processes we can deliver
+    if (acknowledged_[m].size() <= numProcesses_ / 2) {
+        DEBUGLOGRECEIVE("Don't have enough acknowledgements. Have only: " << acknowledged_[m].size());
+        return false;
+    }
+
+    DEBUGLOGRECEIVE("Have enough acknowledgements " << "Next expected message ID is: " << nextExpectedMsgId_[p]);
+    // (2) FIFO condition: messages must be delivered in order
+    return id == nextExpectedMsgId_[p];
 }
+
+void FifoBroadcast::tryDeliverPending() {
+    DEBUGLOGRECEIVE("Checking if we can deliver any other messages from pending now");
+    DEBUGLOGRECEIVE("Pending is currently:");
+    printPending();
+
+
+    // We must iterate using iterator because deliverMessage() erases from the set.
+    for (auto it = pendingDelivery_.begin(); it != pendingDelivery_.end();) {
+        const Message &m = *it;
+
+        if (canDeliver(m)) {
+            DEBUGLOGRECEIVE("In tryDeliverPending, can now deliver (" << m.origSenderId << ", " << m.messageId << "):");
+
+            // Save next iterator before delivering
+            auto next = std::next(it);
+
+            deliverMessage(m);   // this will erase m from pendingDelivery_
+
+            it = next;
+        } else {
+            ++it;
+        }
+    }
+}
+
 
 void FifoBroadcast::logBroadcast(unsigned long messageId) { 
     if (!logFile_.is_open()) {
@@ -154,25 +214,35 @@ void FifoBroadcast::stop() {
     }
 }
 
-void FifoBroadcast::printDelivered() const {
+void FifoBroadcast::printDelivered() {
     #ifdef DEBUGRECEIVE
-        DEBUGLOG("\n===== Delivered Messages =====\n");
+        DEBUGLOGRECEIVE("\n===== Delivered Messages =====\n");
         for (const Message& msg: delivered_) {
-            DEBUGLOG(msg.origSenderId << ", " << msg.messageId);
+            DEBUGLOGRECEIVE(msg.origSenderId << ", " << msg.messageId);
         }
-        DEBUGLOG("==============================");
+        DEBUGLOGRECEIVE("==============================");
     #endif
 }
 
-void FifoBroadcast::printAcknowledged() const {
+void FifoBroadcast::printPending() {
     #ifdef DEBUGRECEIVE
-        DEBUGLOG("\n===== Acknowledged Messages =====\n");
+        DEBUGLOGRECEIVE("\n===== Pending Messages =====\n");
+        for (const Message& msg: pendingDelivery_) {
+            DEBUGLOGRECEIVE(msg.origSenderId << ", " << msg.messageId);
+        }
+        DEBUGLOGRECEIVE("==============================");
+    #endif
+}
+
+void FifoBroadcast::printAcknowledged() {
+    #ifdef DEBUGRECEIVE
+        DEBUGLOGRECEIVE("\n===== Acknowledged Messages =====\n");
         for (const auto& [msg, processIds] : acknowledged_) {
-            DEBUGLOG("For message " << msg.origSenderId << ", " << msg.messageId << ": ");
+            DEBUGLOGRECEIVE("For message " << msg.origSenderId << ", " << msg.messageId << ": ");
             for (const auto& procId : processIds) {
-                DEBUGLOG("  Process " << procId);
+                DEBUGLOGRECEIVE("  Process " << procId);
             }
         }
-        DEBUGLOG("==============================");
+        DEBUGLOGRECEIVE("==============================");
     #endif
 }
