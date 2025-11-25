@@ -7,7 +7,7 @@
 // TODO - ************ TURN THIS OFF BEFORE SUBMISSION ****************
 // #define DEBUG
 // #define DEBUGBROADCAST
-#define DEBUGRECEIVE
+// #define DEBUGRECEIVE
 
 // Debug logging
 #ifdef DEBUGBROADCAST
@@ -42,9 +42,9 @@ FifoBroadcast::FifoBroadcast(unsigned long myProcessId, std::unordered_map<unsig
 
     // Initialise vars:
     numProcesses_ = hostMapById.size();
-    msgSeqNumber_ = 0;
+    msgSeqNumber_ = 0; // Used for broadcasting
     for (auto &[pid, _] : hostMapById_) {
-        nextExpectedMsgId_[pid] = 1;
+        nextExpectedMsgId_[pid] = 1; // Expecting 1st message to arrive
     }
 
     in_addr_t myIp = hostMapById_[myProcessId_].first;
@@ -108,6 +108,8 @@ void FifoBroadcast::receivedMessage(const Message& message, const unsigned long&
 
     if (canDeliver(message)) {
         deliverMessage(message);
+        // also try to deliver other now-unblocked messages
+        tryDeliverPending();   
     }
 }
 
@@ -120,6 +122,10 @@ void FifoBroadcast::deliverMessage(Message message) {
     // Add it to our delivered:
     delivered_.insert(message);
 
+    // Debug
+    DEBUGLOGRECEIVE("Just delivered a message so adding it to delivered. Delivered now: ");
+    printDelivered();
+
     // update next expected id for that sender
     nextExpectedMsgId_[message.origSenderId]++;
     DEBUGLOGRECEIVE("Next expected message ID is now: " << nextExpectedMsgId_[message.origSenderId]);
@@ -129,16 +135,8 @@ void FifoBroadcast::deliverMessage(Message message) {
     DEBUGLOGRECEIVE("Just delivered a message so removing it from pending. Pending now: ");
     printPending();
 
-
-    // Debug
-    DEBUGLOGRECEIVE("Just delivered a message so adding it to delivered. Delivered now: ");
-    printDelivered();
-
-    // Log the send:
+    // Log the delivery:
     logDelivery(message);    
-
-    // also try to deliver other now-unblocked messages
-    tryDeliverPending();   
 }
 
 bool FifoBroadcast::haveDelivered(Message message) {
@@ -167,25 +165,26 @@ void FifoBroadcast::tryDeliverPending() {
     DEBUGLOGRECEIVE("Pending is currently:");
     printPending();
 
-
-    // We must iterate using iterator because deliverMessage() erases from the set.
+    // iterate safely: deliverMessage() erases the message, so save next iterator first
     for (auto it = pendingDelivery_.begin(); it != pendingDelivery_.end();) {
         const Message &m = *it;
 
         if (canDeliver(m)) {
             DEBUGLOGRECEIVE("In tryDeliverPending, can now deliver (" << m.origSenderId << ", " << m.messageId << "):");
 
-            // Save next iterator before delivering
+            // Save next iterator before delivering (deliverMessage erases m)
             auto next = std::next(it);
 
-            deliverMessage(m);   // this will erase m from pendingDelivery_
+            deliverMessage(m); // Since pendingDelivery_ ordered already, and deliverMessage updates nextExpectedMessageId_, this will work
 
+            // continue from saved next iterator
             it = next;
         } else {
             ++it;
         }
     }
 }
+
 
 
 void FifoBroadcast::logBroadcast(unsigned long messageId) { 
