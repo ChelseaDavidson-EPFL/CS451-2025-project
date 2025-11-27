@@ -50,6 +50,7 @@ public:
     void stop();
 
     void setDeliverCallback(std::function<void(Message, unsigned long)> cb);
+    void setDeliverCallbackToDefault();
     void sendMessage(const Message& message, unsigned long receiverId);
 
 private:

@@ -70,13 +70,6 @@ PerfectLink::PerfectLink(unsigned long myProcessId, in_addr_t myProcessIp, unsig
 
     // Start listening on ports
     initReceiverBroadcaster();
-    
-    // // Define delivery callback - change this for later assignments
-    // deliverCallback_ = [this](Message message, unsigned long senderId){
-    //     DEBUGLOG("Delivered \"" << message.messageId << "\" from: " << senderId);
-    //     logDelivery(message.origSenderId, message.messageId);
-    // };
-
 }
 
 PerfectLink::~PerfectLink() {
@@ -85,6 +78,15 @@ PerfectLink::~PerfectLink() {
 
 void PerfectLink::setDeliverCallback(std::function<void(Message, unsigned long)> cb) {
     deliverCallback_ = cb;
+}
+
+void PerfectLink::setDeliverCallbackToDefault() {
+    // Define delivery callback - change this for later assignments
+    deliverCallback_ = [this](Message message, unsigned long senderId){
+        DEBUGLOG("Delivered \"" << message.messageId << "\" from: " << senderId);
+        logDelivery(message.origSenderId, message.messageId);
+    };
+
 }
 
 
