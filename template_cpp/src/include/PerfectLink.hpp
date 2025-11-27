@@ -90,6 +90,7 @@ private:
 
     std::mutex pendingMapMutex_;
     std::mutex partialPacketMutex_;
+    std::mutex loggingMutex_;
 
     std::unordered_map<unsigned long, std::atomic<unsigned long>> packetSeqNumber_; // receiverId, seqNum
     std::function<void(Message, unsigned long)> deliverCallback_;

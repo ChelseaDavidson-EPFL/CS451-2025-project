@@ -517,8 +517,12 @@ void PerfectLink::logDelivery(unsigned long senderId, unsigned long messageId) {
         std::cerr << "Failed to open log file: " << logPath_ << std::endl;
         return;
     }
-    logFile_ << "d " << senderId << " " << messageId << "\n";
-    if (++writeCounter_ % linesInLogBatch_ == 0) logFile_.flush(); // every 1000 lines
+    {
+        std::lock_guard<std::mutex> lock(loggingMutex_);
+        logFile_ << "d " << senderId << " " << messageId << "\n";
+        if (++writeCounter_ % linesInLogBatch_ == 0) logFile_.flush(); // every 1000 lines
+    }
+    
 }
 
 void PerfectLink::logSendPacket(const std::string& packet) { // TODO - probably don't want this anymore or need to adapt it to be for each receiverId
@@ -558,9 +562,12 @@ void PerfectLink::logSendMessage(const std::string& messageIds) {
         return;
     }
     std::string messageId = messageIds.substr(sep+1); // First value is the originalSenderId, second value is the msgId
-
-    logFile_ << "b " << messageId << "\n";
-    if (++writeCounter_ % linesInLogBatch_ == 0) logFile_.flush(); // every 1000 lines
+    
+    {
+        std::lock_guard<std::mutex> lock(loggingMutex_);
+        logFile_ << "b " << messageId << "\n";
+        if (++writeCounter_ % linesInLogBatch_ == 0) logFile_.flush(); // every 1000 lines
+    }
 }
 
 void PerfectLink::stop() {
@@ -568,8 +575,11 @@ void PerfectLink::stop() {
     if (receiverThread_.joinable()) receiverThread_.join();
     if (resendThread_.joinable()) resendThread_.join();
     if (loggingToFile_ && logFile_.is_open()) {
-        logFile_.flush();
-        logFile_.close();
+        {
+            std::lock_guard<std::mutex> lock(loggingMutex_);
+            logFile_.flush();
+            logFile_.close();
+        }
     }
     close(sockfd_);
     printDelivered();

@@ -53,40 +53,36 @@ public:
     }
 
     in_addr_t ipLookup(const char *host) {
-      struct addrinfo hints, *res;
+      struct addrinfo hints{};
+      struct addrinfo *res = nullptr;
+
       char addrstr[128];
-      void *ptr;
 
       memset(&hints, 0, sizeof(hints));
-      hints.ai_family = PF_UNSPEC;
+      hints.ai_family = AF_UNSPEC;
       hints.ai_socktype = SOCK_STREAM;
       hints.ai_flags |= AI_CANONNAME;
 
-      if (getaddrinfo(host, NULL, &hints, &res) != 0) {
-        throw std::runtime_error(
-            "Could not resolve host `" + std::string(host) +
-            "` to IP: " + std::string(std::strerror(errno)));
+      int status = getaddrinfo(host, nullptr, &hints, &res);
+      if (status != 0) {
+          throw std::runtime_error(
+              "Could not resolve host `" + std::string(host) +
+              "` to IP: " + gai_strerror(status));
       }
 
-      while (res) {
-        inet_ntop(res->ai_family, res->ai_addr->sa_data, addrstr, 128);
+      for (struct addrinfo *p = res; p != nullptr; p = p->ai_next) {
+          if (p->ai_family == AF_INET) {
+              auto *addr_in = reinterpret_cast<sockaddr_in *>(p->ai_addr);
+              void *ptr = static_cast<void *>(&addr_in->sin_addr);
 
-        switch (res->ai_family) {
-        case AF_INET:
-          ptr =
-              &(reinterpret_cast<struct sockaddr_in *>(res->ai_addr))->sin_addr;
-          inet_ntop(res->ai_family, ptr, addrstr, 128);
-          return inet_addr(addrstr);
-          break;
-        // case AF_INET6:
-        //     ptr = &((struct sockaddr_in6 *) res->ai_addr)->sin6_addr;
-        //     break;
-        default:
-          break;
-        }
-        res = res->ai_next;
+              inet_ntop(AF_INET, ptr, addrstr, sizeof(addrstr));
+
+              freeaddrinfo(res);  // IMPORTANT
+              return inet_addr(addrstr);
+          }
       }
 
+      freeaddrinfo(res);
       throw std::runtime_error("No host resolves to IPv4");
     }
   };

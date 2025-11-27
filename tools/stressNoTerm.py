@@ -176,7 +176,8 @@ class StressTest:
             self.stress()
 
 
-def startProcesses(processes, runscript, hostsFilePath, configFilePaths, outputDir):
+### CHANGED: Add valgrind flag support here
+def startProcesses(processes, runscript, hostsFilePath, configFilePaths, outputDir, use_valgrind=False):
     runscriptPath = os.path.abspath(runscript)
     if not os.path.isfile(runscriptPath):
         raise Exception(f"`{runscriptPath}` is not a file")
@@ -193,11 +194,22 @@ def startProcesses(processes, runscript, hostsFilePath, configFilePaths, outputD
     bin_java = os.path.join(baseDir, "bin", "da_proc.jar")
 
     if os.path.exists(bin_cpp):
-        cmd = [bin_cpp]
+        base_cmd = [bin_cpp]
     elif os.path.exists(bin_java):
-        cmd = ["java", "-jar", bin_java]
+        base_cmd = ["java", "-jar", bin_java]
     else:
         raise Exception("No binary found. Build before validating.")
+
+    ### ADDED: Wrap binary with valgrind if requested
+    if use_valgrind and os.path.exists(bin_cpp):
+        cmd = [
+            "valgrind",
+            "--leak-check=full",
+            "--track-origins=yes",
+            "--error-exitcode=1",
+        ] + base_cmd
+    else:
+        cmd = base_cmd
 
     procs = []
     for pid, config_path in zip(range(1, processes + 1), itertools.cycle(configFilePaths)):
@@ -221,6 +233,7 @@ def main(parser_results, testConfig):
     runscript = parser_results.runscript
     logsDir = parser_results.logsDir
     processes = parser_results.processes
+    use_valgrind = parser_results.valgrind  ### ADDED
 
     if not os.path.isdir(logsDir):
         raise ValueError(f"Directory `{logsDir}` does not exist")
@@ -247,7 +260,11 @@ def main(parser_results, testConfig):
     else:
         raise ValueError("Unrecognized command")
 
-    procs = startProcesses(processes, runscript, hostsFile, configFiles, logsDir)
+    procs = startProcesses(
+        processes, runscript, hostsFile, configFiles, logsDir,
+        use_valgrind=use_valgrind     ### ADDED
+    )
+
     st = StressTest(procs, testConfig["concurrency"], testConfig["attempts"], testConfig["attemptsDistribution"])
 
     for (logicalPID, procHandle) in procs:
@@ -276,7 +293,7 @@ def main(parser_results, testConfig):
         print("\nTerminating remaining processes gracefully...")
         for pid, proc in still_running:
             print(f"Sending terminate() to process {pid} (PID {proc.pid})")
-            proc.terminate()  # sends SIGTERM, only at the very end
+            proc.terminate()
 
         for pid, proc in still_running:
             try:
@@ -294,11 +311,15 @@ def main(parser_results, testConfig):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    sub_parsers = parser.add_subparsers(dest="command")  # no 'required=True' (for Python 3.6)
-    
+    sub_parsers = parser.add_subparsers(dest="command")
+
     parser_perfect = sub_parsers.add_parser("perfect")
     parser_fifo = sub_parsers.add_parser("fifo")
     parser_agreement = sub_parsers.add_parser("agreement")
+
+    ### ADDED: valgrind flag for all modes
+    for sp in [parser_perfect, parser_fifo, parser_agreement]:
+        sp.add_argument("--valgrind", action="store_true", help="Run processes under Valgrind")
 
     for sp in [parser_perfect, parser_fifo, parser_agreement]:
         sp.add_argument("-r", "--runscript", required=True)
@@ -314,7 +335,6 @@ if __name__ == "__main__":
 
     results = parser.parse_args()
 
-    # manual enforcement for Python 3.6
     if results.command is None:
         parser.print_help(sys.stderr)
         sys.exit(1)
@@ -326,4 +346,3 @@ if __name__ == "__main__":
     }
 
     main(results, testConfig)
-
