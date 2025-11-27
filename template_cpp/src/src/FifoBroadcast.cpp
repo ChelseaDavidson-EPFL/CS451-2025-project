@@ -65,13 +65,20 @@ FifoBroadcast::~FifoBroadcast() {
     stop();
 }
 
-void FifoBroadcast::broadcast(const std::string& message) {
+void FifoBroadcast::broadcast(const std::string& message) {    
     // Add this message to the pending list for this process:
     unsigned long msgId = ++msgSeqNumber_;
     Message pendingMessage{myProcessId_, msgId, message};
-    pendingDelivery_.insert(pendingMessage);
-    acknowledged_[pendingMessage].insert(myProcessId_);
+
+    {   // lock shared state
+        std::lock_guard<std::mutex> lock(stateMutex_);
+        pendingDelivery_.insert(pendingMessage);
+        acknowledged_[pendingMessage].insert(myProcessId_);
+    }
+
     logBroadcast(msgId);
+
+    // send to other processes (no lock, avoids deadlock)
     sendMessageToAllProcesses(pendingMessage);
 }
 
@@ -79,64 +86,75 @@ void FifoBroadcast::broadcast(const std::string& message) {
 void FifoBroadcast::sendMessageToAllProcesses(const Message& message) {
     for (const auto& entry : hostMapById_) {
         unsigned long processId = entry.first;
-        if (processId == myProcessId_) { // Skip itself - TODO - idk if this is correct
-            continue;
-        }
+
+        if (processId == myProcessId_) continue; // Skip itself - TODO - idk if this is correct
+
         perfectLinkInstance_ -> sendMessage(message, processId);
     }
 }
 
 void FifoBroadcast::receivedMessage(const Message& message, const unsigned long& senderId) {
     DEBUGLOGRECEIVE("Received message: " << message.origSenderId << ", " << message.messageId);
-    if (haveDelivered(message)) { // Don't want to waste time on something we've already delivered
-        DEBUGLOGRECEIVE("Already delivered message");
-        return; 
-    }
-    acknowledged_[message].insert(senderId); // The sender ID has acknowledged this message by sending it to us
 
-    auto [it, inserted] = pendingDelivery_.insert(message); // Only inserts if it wasn't already in there
-    DEBUGLOGRECEIVE("Added received message to pending. Pending is now:");
-    printPending();
+    bool newlyInserted = false;
+    bool canDeliverNow = false;
+
+    {
+        std::lock_guard<std::mutex> lock(stateMutex_);
+        if (haveDelivered(message)) { // Don't want to waste time on something we've already delivered
+            DEBUGLOGRECEIVE("Already delivered message");
+            return; 
+        }
+        acknowledged_[message].insert(senderId);
+
+        auto [it, inserted] = pendingDelivery_.insert(message);
+        DEBUGLOGRECEIVE("Added received message to pending. Pending is now:");
+        printPending();
+        newlyInserted = inserted;
+
+        // This process has also now seen the message so they can acknowledge it from their perspective
+        acknowledged_[message].insert(myProcessId_); // TODO - should this be here?
+        printAcknowledged();
+
+        if (canDeliver(message)) canDeliverNow = true;
+    }
 
     // Rebroadcast if it's the first time we're seeing it
-    if (inserted) { // Means message wasn't in pendingDelivery_
-        sendMessageToAllProcesses(message); // TODO - Do I need to be passing on the acknowledgement for the process I received this from?
+    if (newlyInserted) {
+        sendMessageToAllProcesses(message);
     }
-    // This process has also now seen the message so they can acknowledge it from their perspective
-    acknowledged_[message].insert(myProcessId_); // TODO - should this be here?
-    printAcknowledged();
 
-    if (canDeliver(message)) {
-        deliverMessage(message);
+    if (canDeliverNow) {
+        deliverMessage(message);      // deliverMessage locks internally
         // also try to deliver other now-unblocked messages
-        tryDeliverPending();   
+        tryDeliverPending();          // tryDeliverPending locks internally
     }
 }
 
-void FifoBroadcast::deliverMessage(Message message) {
-    if (haveDelivered(message)) {
-      return; // Don't want to deliver again
-    }
+void FifoBroadcast::deliverMessage(const Message& message) {
     DEBUGLOGRECEIVE("Delivering  (" << message.origSenderId << ", " << message.messageId << "):");
+    {
+        std::lock_guard<std::mutex> lock(stateMutex_);
+        // Add it to our delivered by updated next expected id for that sender
+        nextExpectedMsgId_[message.origSenderId]++;
+        DEBUGLOGRECEIVE("Next expected message ID is now: " << nextExpectedMsgId_[message.origSenderId]);
 
-    // Add it to our delivered by updated next expected id for that sender
-    nextExpectedMsgId_[message.origSenderId]++;
-    DEBUGLOGRECEIVE("Next expected message ID is now: " << nextExpectedMsgId_[message.origSenderId]);
+        // Debug
+        DEBUGLOGRECEIVE("Just delivered a message so adding it to delivered. Delivered now: ");
+        printDelivered();
 
-    // Debug
-    DEBUGLOGRECEIVE("Just delivered a message so adding it to delivered. Delivered now: ");
-    printDelivered();
+        // Remove it from pending delivery
+        pendingDelivery_.erase(message);
+        acknowledged_.erase(message);
+        DEBUGLOGRECEIVE("Just delivered a message so removing it from pending. Pending now: ");
+        printPending();
+        DEBUGLOGRECEIVE("Just delivered a message so removing it from acknowledged. Acknowledged now: ");
+        printAcknowledged();
 
-    // Remove it from pending delivery
-    pendingDelivery_.erase(message);
-    acknowledged_.erase(message);
-    DEBUGLOGRECEIVE("Just delivered a message so removing it from pending. Pending now: ");
-    printPending();
-    DEBUGLOGRECEIVE("Just delivered a message so removing it from acknowledged. Acknowledged now: ");
-    printAcknowledged();
+    }
 
     // Log the delivery:
-    logDelivery(message);    
+    logDelivery(message);
 }
 
 bool FifoBroadcast::haveDelivered(Message message) {
@@ -161,34 +179,36 @@ bool FifoBroadcast::canDeliver(const Message &m) {
     DEBUGLOGRECEIVE("Have enough acknowledgements " << "Next expected message ID is: " << nextExpectedMsgId_[p]);
     // (2) FIFO condition: messages must be delivered in order
     return id == nextExpectedMsgId_[p];
+
 }
 
 void FifoBroadcast::tryDeliverPending() {
     DEBUGLOGRECEIVE("Checking if we can deliver any other messages from pending now");
     DEBUGLOGRECEIVE("Pending is currently:");
     printPending();
+    bool progress = true;
 
-    // iterate safely: deliverMessage() erases the message, so save next iterator first
-    for (auto it = pendingDelivery_.begin(); it != pendingDelivery_.end();) {
-        const Message &m = *it;
+    while (progress) {
+        progress = false;
+        Message toDeliver;
 
-        if (canDeliver(m)) {
-            DEBUGLOGRECEIVE("In tryDeliverPending, can now deliver (" << m.origSenderId << ", " << m.messageId << "):");
+        {
+            std::lock_guard<std::mutex> lock(stateMutex_);
 
-            // Save next iterator before delivering (deliverMessage erases m)
-            auto next = std::next(it);
+            for (const auto& m : pendingDelivery_) {
+                if (canDeliver(m)) {
+                    toDeliver = m;
+                    progress = true;
+                    break;
+                }
+            }
+        } // Unlock
 
-            deliverMessage(m); // Since pendingDelivery_ ordered already, and deliverMessage updates nextExpectedMessageId_, this will work
-
-            // continue from saved next iterator
-            it = next;
-        } else {
-            ++it;
+        if (progress) {
+            deliverMessage(toDeliver);
         }
     }
 }
-
-
 
 void FifoBroadcast::logBroadcast(unsigned long messageId) { 
     if (!logFile_.is_open()) {

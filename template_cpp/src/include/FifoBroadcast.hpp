@@ -7,6 +7,7 @@
 #include <unordered_map>
 #include <map>
 #include <set>
+#include <mutex> 
 
 #include "PerfectLink.hpp"
 
@@ -44,7 +45,7 @@ private:
 
     void sendMessageToAllProcesses(const Message& message);
     void receivedMessage(const Message& message, const unsigned long& senderId);
-    void deliverMessage(Message message);
+    void deliverMessage(const Message& m);
     bool haveDelivered(Message message);
     bool canDeliver(const Message &m);
     void tryDeliverPending();
