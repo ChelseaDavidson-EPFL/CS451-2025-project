@@ -100,7 +100,7 @@ void FifoBroadcast::receivedMessage(const Message& message, const unsigned long&
 
     // Rebroadcast if it's the first time we're seeing it
     if (inserted) { // Means message wasn't in pendingDelivery_
-        sendMessageToAllProcesses(message);
+        sendMessageToAllProcesses(message); // TODO - Do I need to be passing on the acknowledgement for the process I received this from?
     }
     // This process has also now seen the message so they can acknowledge it from their perspective
     acknowledged_[message].insert(myProcessId_); // TODO - should this be here?
@@ -119,31 +119,34 @@ void FifoBroadcast::deliverMessage(Message message) {
     }
     DEBUGLOGRECEIVE("Delivering  (" << message.origSenderId << ", " << message.messageId << "):");
 
-    // Add it to our delivered:
-    delivered_.insert(message);
+    // Add it to our delivered by updated next expected id for that sender
+    nextExpectedMsgId_[message.origSenderId]++;
+    DEBUGLOGRECEIVE("Next expected message ID is now: " << nextExpectedMsgId_[message.origSenderId]);
 
     // Debug
     DEBUGLOGRECEIVE("Just delivered a message so adding it to delivered. Delivered now: ");
     printDelivered();
 
-    // update next expected id for that sender
-    nextExpectedMsgId_[message.origSenderId]++;
-    DEBUGLOGRECEIVE("Next expected message ID is now: " << nextExpectedMsgId_[message.origSenderId]);
-
     // Remove it from pending delivery
     pendingDelivery_.erase(message);
+    acknowledged_.erase(message);
     DEBUGLOGRECEIVE("Just delivered a message so removing it from pending. Pending now: ");
     printPending();
+    DEBUGLOGRECEIVE("Just delivered a message so removing it from acknowledged. Acknowledged now: ");
+    printAcknowledged();
 
     // Log the delivery:
     logDelivery(message);    
 }
 
 bool FifoBroadcast::haveDelivered(Message message) {
-    return (delivered_.find(message) != delivered_.end());
+    return message.messageId < nextExpectedMsgId_[message.origSenderId];
 }
 
 bool FifoBroadcast::canDeliver(const Message &m) {
+    if (haveDelivered(m)) {
+      return false; // Can't deliver something we've already delivered
+    }
     unsigned long p = m.origSenderId;
     unsigned long id = m.messageId;
 
@@ -216,8 +219,10 @@ void FifoBroadcast::stop() {
 void FifoBroadcast::printDelivered() {
     #ifdef DEBUGRECEIVE
         DEBUGLOGRECEIVE("\n===== Delivered Messages =====\n");
-        for (const Message& msg: delivered_) {
-            DEBUGLOGRECEIVE(msg.origSenderId << ", " << msg.messageId);
+        for (const auto& [procId, nextExpectedId]: nextExpectedMsgId_) {
+            for (unsigned long msgId = 1; msgId < nextExpectedId; ++msgId) {
+                DEBUGLOGRECEIVE(procId << ", " << msgId);
+            }
         }
         DEBUGLOGRECEIVE("==============================");
     #endif

@@ -31,7 +31,6 @@ private:
     std::set<Message> pendingDelivery_;  // messages ordered first by processId then by messageId // TODO - this will probably have to change
     unsigned long numProcesses_; // at least NumProcesses/2 + 1 are correct
     std::unordered_map<Message, std::set<unsigned long>> acknowledged_; // Message: [processIdsOfAcks]
-    std::set<Message> delivered_;
     std::unordered_map<unsigned long, unsigned long> nextExpectedMsgId_;   // nextExpectedMsgId_[p] = smallest messageId not yet delivered from process p
     std::unique_ptr<PerfectLink> perfectLinkInstance_; // processId: PerfectLink where processId is the receiver 
 
