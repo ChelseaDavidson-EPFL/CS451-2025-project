@@ -215,8 +215,11 @@ void FifoBroadcast::logBroadcast(unsigned long messageId) {
         std::cerr << "Failed to open log file: " << logPath_ << std::endl;
         return;
     }
-    logFile_ << "b " << messageId << "\n";
-    if (++writeCounter_ % linesInLogBatch_ == 0) logFile_.flush(); // every 1000 lines
+    {
+        std::lock_guard<std::mutex> lock(loggingMutex_);
+        logFile_ << "b " << messageId << "\n";
+        if (++writeCounter_ % linesInLogBatch_ == 0) logFile_.flush(); // every 1000 lines
+    }
 } 
 
 void FifoBroadcast::logDelivery(Message message) { 
@@ -224,15 +227,21 @@ void FifoBroadcast::logDelivery(Message message) {
         std::cerr << "Failed to open log file: " << logPath_ << std::endl;
         return;
     }
-    logFile_ << "d " << message.origSenderId << " " << message.messageId << "\n";
-    if (++writeCounter_ % linesInLogBatch_ == 0) logFile_.flush(); // every 1000 lines
+    {
+        std::lock_guard<std::mutex> lock(loggingMutex_);
+        logFile_ << "d " << message.origSenderId << " " << message.messageId << "\n";
+        if (++writeCounter_ % linesInLogBatch_ == 0) logFile_.flush(); // every 1000 lines
+    }
 }
 
 void FifoBroadcast::stop() {
     running_ = false;
     if (logFile_.is_open()) {
-        logFile_.flush();
-        logFile_.close();
+        {
+            std::lock_guard<std::mutex> lock(loggingMutex_);
+            logFile_.flush();
+            logFile_.close();
+        }
     }
 }
 

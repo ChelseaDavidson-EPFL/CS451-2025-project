@@ -41,7 +41,7 @@ private:
 
     // Concurrency primitives
     std::mutex stateMutex_;   // protects pendingDelivery_, acknowledged_, delivered_, nextExpectedMsgId_
-    std::mutex logMutex_;     // protects logFile_ writes / std::cout multi-part output
+    std::mutex loggingMutex_;     // protects logFile_ writes
 
     void sendMessageToAllProcesses(const Message& message);
     void receivedMessage(const Message& message, const unsigned long& senderId);
