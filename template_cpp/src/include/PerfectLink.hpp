@@ -8,6 +8,7 @@
 #include <map>
 #include <list>
 #include <mutex>
+#include <condition_variable>
 #include <ctime>
 #include <set>
 
@@ -92,6 +93,8 @@ private:
     std::mutex pendingMapMutex_;
     std::mutex partialPacketMutex_;
     std::mutex loggingMutex_;
+    std::mutex pendingCvMutex_;
+    std::condition_variable pendingCv_;
 
     std::unordered_map<unsigned long, std::atomic<unsigned long>> packetSeqNumber_; // receiverId, seqNum
     std::function<void(Message, unsigned long)> deliverCallback_;

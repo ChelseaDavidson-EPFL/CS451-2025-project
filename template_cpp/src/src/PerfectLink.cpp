@@ -210,10 +210,13 @@ void PerfectLink::addPacketToPending(const std::string &packetStr, unsigned long
     logSendPacket(packetStr);
     numMessagesInPacket_[receiverId] = 0;
     
-    // lock pending map and assign packet id under that lock
-    std::lock_guard<std::mutex> lockPending(pendingMapMutex_);
-    pending_[receiverId][packet.id] = packet;
-    DEBUGLOGSEND("Added packet id=" << packet.id << " to pending for receiverId: " << receiverId << ". pending_ size for this receiver id is =" << pending_[receiverId].size());
+    { // lock pending map and assign packet id under that lock
+        std::lock_guard<std::mutex> lockPending(pendingMapMutex_);
+        pending_[receiverId][packet.id] = packet;
+        DEBUGLOGSEND("Added packet id=" << packet.id << " to pending for receiverId: " << receiverId << ". pending_ size for this receiver id is =" << pending_[receiverId].size());
+    }
+    // Notify send thread that work is available
+    pendingCv_.notify_one();
 }
 
 void PerfectLink::flushPendingPacketIfReady(unsigned long receiverId) {
@@ -242,12 +245,27 @@ void PerfectLink::flushPendingPacketsIfReady() {
 }
 
 void PerfectLink::sendPacketLoop() {
+    const std::chrono::milliseconds idleWait(100); // max wait
+    const std::chrono::milliseconds shortPoll(10); // small poll when no packets ready
+
     while (running_) {
+        // Try to flush partial packets first (keeps old behaviour)
         flushPendingPacketsIfReady();
+
         Packet packetToSend;
-        if (!findPacketToSend(packetToSend)) { // Updating packetToSend with the packet that is ready to be sent // TODO - reuse this logic when parsing ID
-            DEBUGLOGSEND("Packets were sent too recently or pending_ was empty - waiting 10ms");
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        if (!findPacketToSend(packetToSend)) {
+            // No ready packet; block for a short while or until notified
+            std::unique_lock<std::mutex> lk(pendingCvMutex_);
+            // Wait until new packet is available or timeout so flushPendingPacketsIfReady gets a chance again
+            pendingCv_.wait_for(lk, shortPoll, [this](){
+                std::lock_guard<std::mutex> lock(pendingMapMutex_);
+                // quick check if there is any pending packet
+                for (const auto &outer : pending_) {
+                    if (!outer.second.empty()) return true;
+                }
+                return false;
+            });
+            // after wait_for, loop again to try findPacketToSend()
             continue;
         }
 
