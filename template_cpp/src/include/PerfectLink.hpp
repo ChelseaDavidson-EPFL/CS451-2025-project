@@ -51,6 +51,7 @@ public:
 
     void setDeliverCallback(std::function<void(Message, unsigned long)> cb);
     void setDeliverCallbackToDefault();
+    void setAckCallback(std::function<void(Message, unsigned long)> cb);
     void sendMessage(const Message& message, unsigned long receiverId);
 
 private:
@@ -94,6 +95,7 @@ private:
 
     std::unordered_map<unsigned long, std::atomic<unsigned long>> packetSeqNumber_; // receiverId, seqNum
     std::function<void(Message, unsigned long)> deliverCallback_;
+    std::function<void(Message, unsigned long)> ackCallback_;
     std::map<unsigned long, std::set<unsigned long>> delivered_; // Outer key: senderId, Inner pair: message sequence number (id), message content
     std::map<unsigned long, unsigned long> firstMissingPacketId_; // Outer key: senderId, Inner value: firstMissingMessage_
 
@@ -113,6 +115,7 @@ private:
     bool deliverMessage(unsigned long senderId, const std::string& messagePayload);
     void sendAck(in_addr_t destIp, unsigned short destPort, unsigned long packetId);
     void handleAck(const unsigned long receiverId, const unsigned long pktId);
+    void handlePacketAck(unsigned long receiverId, Packet acknowledgedPacket);
     void logDelivery(unsigned long senderId, unsigned long messageId);
     void logSendPacket(const std::string& packet);
     void logSendMessage(const std::string& messageIds);

@@ -45,6 +45,7 @@ private:
 
     void sendMessageToAllProcesses(const Message& message);
     void receivedMessage(const Message& message, const unsigned long& senderId);
+    void receivedAck(const Message& message, const unsigned long& senderId);
     void deliverMessage(const Message& m);
     bool haveDelivered(Message message);
     bool canDeliver(const Message &m);

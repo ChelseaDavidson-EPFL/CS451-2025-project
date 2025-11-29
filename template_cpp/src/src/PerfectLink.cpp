@@ -3,6 +3,7 @@
 #include <fstream>
 #include <sys/stat.h>  // for mkdir
 #include <string>
+#include <sstream>
 #include <cerrno>
 #include <cstring>
 #include <sys/time.h> // for struct timeval
@@ -13,6 +14,7 @@
 // #define DEBUG
 // #define DEBUGSEND
 // #define DEBUGRECEIVE
+// #define DEBUGACK
 
 // Debug logging
 #ifdef DEBUGSEND
@@ -33,12 +35,18 @@
     #define DEBUGLOG(msg) do {} while(0) // no-op in release
 #endif
 
+#ifdef DEBUGACK
+    #define DEBUGLOGACK(msg) (std::cout << msg << std::endl)
+#else
+    #define DEBUGLOGACK(msg) do {} while(0) // no-op in release
+#endif
+
 PerfectLink::PerfectLink(unsigned long myProcessId, in_addr_t myProcessIp, unsigned short myProcessPort, std::unordered_map<unsigned short, std::pair<unsigned long, in_addr_t>> hostMapByPort, std::unordered_map<unsigned long, std::pair<in_addr_t, unsigned short>> hostMapById, std::string logPath)
     : myProcessId_(myProcessId), myProcessPort_(myProcessPort), myProcessIp_(myProcessIp), hostMapByPort_(hostMapByPort), hostMapById_(hostMapById), logPath_(logPath), running_(false)
 {
     // Create or overwrite the log file
     if (logPath_ == "") {
-        std::cout << "Not logging to file" << std::endl;
+        DEBUGLOG("Not logging to file in Perfect Links");
         loggingToFile_ = false;
     }
     if (loggingToFile_) {
@@ -87,6 +95,10 @@ void PerfectLink::setDeliverCallbackToDefault() {
         logDelivery(message.origSenderId, message.messageId);
     };
 
+}
+
+void PerfectLink::setAckCallback(std::function<void(Message, unsigned long)> cb) {
+    ackCallback_ = cb;
 }
 
 
@@ -242,6 +254,7 @@ void PerfectLink::sendPacketLoop() {
         std::string payload = std::to_string(packetToSend.id) + "|" + packetToSend.messages;
         DEBUGLOGSEND("Sending packet id:" << packetToSend.id << " messages: " << packetToSend.messages);
         auto [receiverIp, receiverPort] = hostMapById_[packetToSend.receiverId];
+        DEBUGLOGACK("Sending packet with payload: "<< payload << " to process " << packetToSend.receiverId);
         sendRaw(payload, receiverIp, receiverPort);
     }
 }
@@ -502,10 +515,61 @@ void PerfectLink::sendAck(in_addr_t destIp, unsigned short destPort, unsigned lo
 }
 
 void PerfectLink::handleAck(const unsigned long receiverId, const unsigned long pktId) {
-    std::lock_guard<std::mutex> lock(pendingMapMutex_); // Destroys and lock and releases mutex when out of scope
-    auto it = pending_[receiverId].find(pktId);
-    if (it != pending_[receiverId].end()) {
-        pending_[receiverId].erase(it);
+    Packet acknowledgedPacket;
+    bool hasPacket = false;
+    {
+        std::lock_guard<std::mutex> lock(pendingMapMutex_); // Destroys and lock and releases mutex when out of scope
+        auto it = pending_[receiverId].find(pktId);
+        if (it != pending_[receiverId].end()) {
+            acknowledgedPacket = it->second;
+            hasPacket = true;
+            pending_[receiverId].erase(it);
+        }
+    }
+    if (hasPacket && ackCallback_) {
+        handlePacketAck(receiverId, acknowledgedPacket);
+    }
+}
+
+
+void PerfectLink::handlePacketAck(unsigned long receiverId, Packet acknowledgedPacket) {
+    // receiverId is who received the message and has just sent back the ack
+    // Packet messages payload is be pktId|sendId-msgId:msg|sendId-mgId:msg ... 
+    std::string payload = acknowledgedPacket.messages;
+    DEBUGLOGACK("Just received ack for packet with payload: " << payload << " from process " << receiverId);
+
+    std::stringstream ss(payload);
+    std::string part;
+
+    // Now parse each "sendId-msgId:msg"
+    while (std::getline(ss, part, '|')) {
+        if (part.empty()) continue;
+
+        // Format: sendId-msgId:content
+        size_t dashPos = part.find('-');
+        if (dashPos == std::string::npos) continue;
+
+        size_t colonPos = part.find(':', dashPos + 1);
+        if (colonPos == std::string::npos) continue;
+
+        // Extract fields
+        std::string senderStr  = part.substr(0, dashPos);
+        std::string msgIdStr   = part.substr(dashPos + 1, colonPos - (dashPos + 1));
+        std::string contentStr = part.substr(colonPos + 1);
+
+        // Convert numeric fields
+        unsigned long senderId = std::stoul(senderStr);
+        unsigned long msgId = std::stoul(msgIdStr);
+
+        // Build the Message object
+        Message msg;
+        msg.origSenderId = senderId;
+        msg.messageId = msgId;
+        msg.content = contentStr;
+
+        // Callback for this message
+        DEBUGLOGACK("Pushing ack for message (" << msg.origSenderId << ", " << msg.messageId << ") up to FIFO");
+        ackCallback_(msg, receiverId);
     }
 }
 

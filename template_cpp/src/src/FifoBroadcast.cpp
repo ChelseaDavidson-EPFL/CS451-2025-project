@@ -8,6 +8,7 @@
 // #define DEBUG
 // #define DEBUGBROADCAST
 // #define DEBUGRECEIVE
+// #define DEBUGACK
 
 // Debug logging
 #ifdef DEBUGBROADCAST
@@ -28,6 +29,13 @@
 #else
     #define DEBUGLOG(msg) do {} while(0) // no-op in release
 #endif
+
+#ifdef DEBUGACK
+    #define DEBUGLOGACK(msg) (std::cout << msg << std::endl)
+#else
+    #define DEBUGLOGACK(msg) do {} while(0) // no-op in release
+#endif
+
 
 FifoBroadcast::FifoBroadcast(unsigned long myProcessId, std::unordered_map<unsigned long, std::pair<in_addr_t, unsigned short>> hostMapById, std::unordered_map<unsigned short, std::pair<unsigned long, in_addr_t>> hostMapByPort, std::string logPath)
     : myProcessId_(myProcessId), hostMapById_(hostMapById), hostMapByPort_(hostMapByPort), logPath_(logPath), running_(false)
@@ -55,6 +63,12 @@ FifoBroadcast::FifoBroadcast(unsigned long myProcessId, std::unordered_map<unsig
     perfectLinkInstance_->setDeliverCallback(
         [this](Message msg, unsigned long senderId) {
             this->receivedMessage(msg, senderId);
+        }
+    );
+
+    perfectLinkInstance_->setAckCallback(
+        [this](Message msg, unsigned long senderId) {
+            this->receivedAck(msg, senderId);
         }
     );
 
@@ -93,6 +107,7 @@ void FifoBroadcast::sendMessageToAllProcesses(const Message& message) {
     }
 }
 
+
 void FifoBroadcast::receivedMessage(const Message& message, const unsigned long& senderId) {
     DEBUGLOGRECEIVE("Received message: " << message.origSenderId << ", " << message.messageId);
 
@@ -130,6 +145,32 @@ void FifoBroadcast::receivedMessage(const Message& message, const unsigned long&
         tryDeliverPending();          // tryDeliverPending locks internally
     }
 }
+
+void FifoBroadcast::receivedAck(const Message& message, const unsigned long& senderId) { // This means we sent a message to a process and got an ack back
+    DEBUGLOGACK("Received ack for message: " << message.origSenderId << ", " << message.messageId << "from " << senderId);
+
+    bool canDeliverNow = false;
+
+    {
+        std::lock_guard<std::mutex> lock(stateMutex_);
+        if (haveDelivered(message)) { // Don't want to waste time on something we've already delivered
+            DEBUGLOGACK("Already delivered message");
+            return; 
+        } // Havent' delivered this one yet
+        acknowledged_[message].insert(senderId);
+
+        // Would have already been in our pending and we would have already acknowledged it since we were the ones that sent it to them
+        if (canDeliver(message)) canDeliverNow = true;
+    }
+
+    if (canDeliverNow) {
+        DEBUGLOGACK("Due to ack, can now deliver message");
+        deliverMessage(message);      // deliverMessage locks internally
+        // also try to deliver other now-unblocked messages
+        tryDeliverPending();          // tryDeliverPending locks internally
+    }
+}
+
 
 void FifoBroadcast::deliverMessage(const Message& message) {
     DEBUGLOGRECEIVE("Delivering  (" << message.origSenderId << ", " << message.messageId << "):");
