@@ -241,7 +241,7 @@ void PerfectLink::addPacketToPending(const std::string &packetStr, unsigned long
     pendingCv_.notify_one();
 }
 
-void PerfectLink::flushPendingPacketIfReady(unsigned long receiverId) {
+void PerfectLink::flushPartialPacketIfReady(unsigned long receiverId) {
     bool shouldFlush = false;
     { // Holding partialPacketMutex_
         std::lock_guard<std::mutex> lock(partialPacketMutex_);
@@ -255,20 +255,21 @@ void PerfectLink::flushPendingPacketIfReady(unsigned long receiverId) {
     if (shouldFlush) flushMessages(receiverId); // flushMessages does copy-and-call safely
 }
 
-void PerfectLink::flushPendingPacketsIfReady() {
+void PerfectLink::flushPartialPacketsIfReady() {
      for (const auto& [processId, _] : hostMapById_) {
         // Skip it's own process  // TODO - is this correct?
         if (processId == myProcessId_) {
             continue;
         }
 
-        flushPendingPacketIfReady(processId);
+        flushPartialPacketIfReady(processId);
      }
 }
 
 void PerfectLink::sendPacketLoop() {
     // Resend thread main loop: driven by resendHeap_. We also keep compatibility with pendingCv_ notifications.
     while (running_) {
+        flushPartialPacketsIfReady();
         ResendTask task;
         bool haveTask = false;
 
@@ -296,19 +297,9 @@ void PerfectLink::sendPacketLoop() {
             haveTask = true;
         }
 
-        if (!haveTask) continue;
+        if (!haveTask) continue;       
 
-        // Validate if this task was cancelled (i.e., acked)
-        uint64_t key = makeKey(task.receiverId, task.pktId);
-        {
-            std::lock_guard<std::mutex> lk(heapMutex_);
-            if (cancelledPackets_.find(key) != cancelledPackets_.end()) {
-                // already acked => ignore this task (and optionally remove tombstone after some time)
-                continue;
-            }
-        }
-
-        // Lookup the packet in pending_ (under pendingMapMutex_)
+        // Lookup the packet in pending_ and check it's still there (under pendingMapMutex_)
         Packet packetToSend;
         bool exists = false;
         {
@@ -324,9 +315,7 @@ void PerfectLink::sendPacketLoop() {
         }
 
         if (!exists) {
-            // Somebody removed it concurrently (ack arrived), mark cancelled for safety and continue
-            std::lock_guard<std::mutex> lk(heapMutex_);
-            cancelledPackets_.insert(key);
+            // Somebody removed it concurrently (ack arrived), so this is a stale task
             continue;
         }
 
@@ -337,50 +326,20 @@ void PerfectLink::sendPacketLoop() {
         DEBUGLOGACK("Sending packet with payload: "<< payload << " to process " << packetToSend.receiverId);
         sendRaw(payload, receiverIp, receiverPort);
 
-        // Reschedule next resend for this packet (if still pending). Schedule at now + retransmitInterval_
+        // Reschedule next resend for this packet. Schedule at now + retransmitInterval_
         {
             std::lock_guard<std::mutex> lk(heapMutex_);
-            // double-check cancelled set again quickly
-            if (cancelledPackets_.find(key) == cancelledPackets_.end()) {
-                ResendTask nextTask;
-                nextTask.receiverId = task.receiverId;
-                nextTask.pktId = task.pktId;
-                nextTask.nextSendTime = Clock::now() + retransmitInterval_;
-                resendHeap_.push(std::move(nextTask));
-                // notify is not required here because we are running the thread already, but keep symmetric signaling
-                heapCv_.notify_one();
-            }
+            ResendTask nextTask;
+            nextTask.receiverId = task.receiverId;
+            nextTask.pktId = task.pktId;
+            nextTask.nextSendTime = Clock::now() + retransmitInterval_;
+            resendHeap_.push(std::move(nextTask));
+            // notify is not required here because we are running the thread already, but keep symmetric signaling
+            heapCv_.notify_one();
         }
     } // while running_
 
     DEBUGLOG("sendPacketLoop exiting");
-}
-
-
-bool PerfectLink::findPacketToSend(Packet& outPacket) { // Finds a packet in pending_ that hasn't been sent too recently
-    auto now = Clock::now();
-    const std::chrono::milliseconds minDelay(100);
-
-    std::lock_guard<std::mutex> lock(pendingMapMutex_);
-
-    // Loop through outer map
-    for (auto& outerEntry : pending_) {
-        // outerEntry.first is the outer key
-        // outerEntry.second is the inner map
-        auto& innerMap = outerEntry.second;
-
-        // Loop through inner map // TODO - is this going to always prioritise the packets being sent to the lowest processIds?
-        for (auto& innerEntry : innerMap) {
-            Packet& pkt = innerEntry.second;
-
-            if (now - pkt.lastSentTime > minDelay) {
-                pkt.lastSentTime = now;  // update while holding lock
-                outPacket = pkt;         // make a safe copy
-                return true;
-            }
-        }
-    }
-    return false; // nothing ready to be sent again
 }
 
 void PerfectLink::sendRaw(const std::string& payload, in_addr_t ip, unsigned short port){
@@ -672,19 +631,13 @@ void PerfectLink::handleAck(const unsigned long receiverId, const unsigned long 
                 acknowledgedPacket = it->second;
                 hasPacket = true;
                 itOuter->second.erase(it);
-                // if the inner map becomes empty you may optionally erase the outer entry:
+                // if the inner map becomes empty, erase the outer entry:
                 if (itOuter->second.empty()) pending_.erase(itOuter);
             }
         }
     }
 
-    // Mark as cancelled so any heap entries for this (receiverId,pktId) are ignored when popped
-    {
-        std::lock_guard<std::mutex> lk(heapMutex_);
-        cancelledPackets_.insert(makeKey(receiverId, pktId));
-    }
-
-    // Notify heap thread in case the top was cancelled (so it can pop quickly)
+    // Notify heap thread in case the top was cancelled (ie. it was just acked) (so it can pop quickly)
     heapCv_.notify_one();
 
     if (hasPacket && ackCallback_) {

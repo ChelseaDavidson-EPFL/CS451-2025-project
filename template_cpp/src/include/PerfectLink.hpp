@@ -95,17 +95,10 @@ private:
         }
     };
 
-    static inline uint64_t makeKey(unsigned long receiverId, unsigned long pktId) {
-        return (static_cast<uint64_t>(receiverId) << 32) | (static_cast<uint64_t>(pktId) & 0xffffffffULL);
-    }
-
     // Priority queue (min-heap) of resend tasks
     std::priority_queue<ResendTask, std::vector<ResendTask>, std::greater<ResendTask>> resendHeap_;
-    std::mutex heapMutex_;                // protects resendHeap_ and cancelledPackets_
     std::condition_variable heapCv_;      // notifies resend thread of new tasks or earlier deadlines
 
-    // tombstone set for cancelled / already-acked packets (key = (receiverId<<32) | pktId)
-    std::unordered_set<uint64_t> cancelledPackets_;
     std::chrono::milliseconds retransmitInterval_{100}; // base retransmit delay (tunable)
 
     std::unordered_map<unsigned long, std::string> partialPacket_; // receiverId, partialPacket
@@ -124,6 +117,7 @@ private:
 
 
     std::mutex pendingMapMutex_;
+    std::mutex heapMutex_;                // protects resendHeap_
     std::mutex partialPacketMutex_;
     std::mutex loggingMutex_;
     std::mutex pendingCvMutex_;
@@ -140,10 +134,9 @@ private:
     void addMessageToPacket(const std::string& messagePayload, unsigned long receiverId) ;
     void flushMessages(unsigned long receiverId);
     void addPacketToPending(const std::string &packetStr, unsigned long receiverId);
-    void flushPendingPacketIfReady(unsigned long receiverId);
-    void flushPendingPacketsIfReady();
+    void flushPartialPacketIfReady(unsigned long receiverId);
+    void flushPartialPacketsIfReady();
     void sendPacketLoop();
-    bool findPacketToSend(Packet& packet);
     void sendRaw(const std::string& payload, in_addr_t ip, unsigned short port);
     void receiverLoop();
     unsigned long parsePacketPayloadId(const std::string& packetIdStr);
