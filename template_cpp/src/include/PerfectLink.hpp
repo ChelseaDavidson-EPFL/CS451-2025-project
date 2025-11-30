@@ -4,6 +4,7 @@
 #include <atomic>
 #include <thread>
 #include <unordered_map>
+#include <queue>        // for std::priority_queue
 #include <functional>
 #include <map>
 #include <list>
@@ -11,6 +12,7 @@
 #include <condition_variable>
 #include <ctime>
 #include <set>
+#include <unordered_set>
 
 struct Message {
     unsigned long origSenderId; // Id of original sender
@@ -81,6 +83,30 @@ private:
         std::string messages;
         Clock::time_point lastSentTime = Clock::now() - std::chrono::milliseconds(100); // So that it sends the message immediately in sendMessageLoop
     };
+
+    // resend heap entry
+    struct ResendTask {
+        std::chrono::steady_clock::time_point nextSendTime;
+        unsigned long receiverId;
+        unsigned long pktId;
+
+        bool operator>(ResendTask const& o) const {
+            return nextSendTime > o.nextSendTime;
+        }
+    };
+
+    static inline uint64_t makeKey(unsigned long receiverId, unsigned long pktId) {
+        return (static_cast<uint64_t>(receiverId) << 32) | (static_cast<uint64_t>(pktId) & 0xffffffffULL);
+    }
+
+    // Priority queue (min-heap) of resend tasks
+    std::priority_queue<ResendTask, std::vector<ResendTask>, std::greater<ResendTask>> resendHeap_;
+    std::mutex heapMutex_;                // protects resendHeap_ and cancelledPackets_
+    std::condition_variable heapCv_;      // notifies resend thread of new tasks or earlier deadlines
+
+    // tombstone set for cancelled / already-acked packets (key = (receiverId<<32) | pktId)
+    std::unordered_set<uint64_t> cancelledPackets_;
+    std::chrono::milliseconds retransmitInterval_{100}; // base retransmit delay (tunable)
 
     std::unordered_map<unsigned long, std::string> partialPacket_; // receiverId, partialPacket
     std::unordered_map<unsigned long, Clock::time_point> lastPacketUpdateTime_; // So we can finish packet after enough time has past
