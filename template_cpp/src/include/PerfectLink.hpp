@@ -4,7 +4,7 @@
 #include <atomic>
 #include <thread>
 #include <unordered_map>
-#include <queue>        // for std::priority_queue
+#include <vector>
 #include <functional>
 #include <map>
 #include <list>
@@ -44,6 +44,38 @@ namespace std {
         }
     };
 }
+
+template <typename T, typename Compare = std::greater<T>>
+class MinHeap {
+public:
+    MinHeap() : comp_() {}
+
+    bool empty() const {
+        return data_.empty();
+    }
+
+    size_t size() const {
+        return data_.size();
+    }
+
+    const T& top() const {
+        return data_.front();
+    }
+
+    void push(const T& value) {
+        data_.push_back(value);
+        std::push_heap(data_.begin(), data_.end(), comp_);
+    }
+
+    void pop() {
+        std::pop_heap(data_.begin(), data_.end(), comp_);
+        data_.pop_back();
+    }
+
+private:
+    std::vector<T> data_;
+    Compare comp_;
+};
 
 class PerfectLink {
 public:
@@ -96,7 +128,7 @@ private:
     };
 
     // Priority queue (min-heap) of resend tasks
-    std::priority_queue<ResendTask, std::vector<ResendTask>, std::greater<ResendTask>> resendHeap_;
+    MinHeap<ResendTask, std::greater<ResendTask>> resendHeap_;
     std::condition_variable heapCv_;      // notifies resend thread of new tasks or earlier deadlines
 
     std::chrono::milliseconds retransmitInterval_{100}; // base retransmit delay (tunable)

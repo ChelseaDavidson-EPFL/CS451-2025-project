@@ -66,7 +66,7 @@ PerfectLink::PerfectLink(unsigned long myProcessId, in_addr_t myProcessIp, unsig
     }
 
     // Initialse messages and packets
-    for (const auto& [processId, _] : hostMapById_) {
+    for (const auto& [processId, pairVal] : hostMapById_) {
         // Skip it's own process  // TODO - is this correct?
         if (processId == myProcessId_) {
             continue;
@@ -82,8 +82,8 @@ PerfectLink::PerfectLink(unsigned long myProcessId, in_addr_t myProcessIp, unsig
         firstMissingPacketId_[processId] = 1;     // Cleaning logic - Initialize first missing packet for each sender process to 1 - waiting for first packet to arrive
 
         // Initialise ack batches
-        numAcksInBatch_[processId] = 0;
-        lastAckUpdateTime_[processId] = Clock::now();
+        numAcksInBatch_[pairVal.second] = 0;
+        lastAckUpdateTime_[pairVal.second] = Clock::now();
     }
 
     // Start listening on ports
@@ -750,6 +750,9 @@ void PerfectLink::logSendMessage(const std::string& messageIds) {
 
 void PerfectLink::stop() {
     running_ = false;
+    // Wake threads waiting on condition variables
+    heapCv_.notify_all();
+    pendingCv_.notify_all();
     if (receiverThread_.joinable()) receiverThread_.join();
     if (resendThread_.joinable()) resendThread_.join();
     if (loggingToFile_ && logFile_.is_open()) {
