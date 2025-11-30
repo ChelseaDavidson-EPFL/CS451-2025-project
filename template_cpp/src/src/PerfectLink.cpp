@@ -223,6 +223,7 @@ void PerfectLink::addPacketToPending(const std::string &packetStr, unsigned long
     { // lock pending map and assign packet id under that lock
         std::lock_guard<std::mutex> lockPending(pendingMapMutex_);
         pending_[receiverId][packet.id] = packet;
+        orderedPendingPackets_.insert(packet);
         DEBUGLOGSEND("Added packet id=" << packet.id << " to pending for receiverId: " << receiverId << ". pending_ size for this receiver id is =" << pending_[receiverId].size());
     }
     // Notify send thread that work is available
@@ -287,30 +288,53 @@ void PerfectLink::sendPacketLoop() {
     }
 }
 
-bool PerfectLink::findPacketToSend(Packet& outPacket) { // Finds a packet in pending_ that hasn't been sent too recently
+bool PerfectLink::findPacketToSend(Packet& outPacket) {  
     auto now = Clock::now();
     const std::chrono::milliseconds minDelay(100);
 
     std::lock_guard<std::mutex> lock(pendingMapMutex_);
 
-    // Loop through outer map
-    for (auto& outerEntry : pending_) {
-        // outerEntry.first is the outer key
-        // outerEntry.second is the inner map
-        auto& innerMap = outerEntry.second;
+    while (!orderedPendingPackets_.empty()) {
 
-        // Loop through inner map // TODO - is this going to always prioritise the packets being sent to the lowest processIds?
-        for (auto& innerEntry : innerMap) {
-            Packet& pkt = innerEntry.second;
+        // Extract oldest element
+        auto nh = orderedPendingPackets_.extract(orderedPendingPackets_.begin());
+        Packet& pkt = nh.value();
 
-            if (now - pkt.lastSentTime > minDelay) {
-                pkt.lastSentTime = now;  // update while holding lock
-                outPacket = pkt;         // make a safe copy
-                return true;
-            }
+        // Check if packet was acknowledged
+        auto outerIt = pending_.find(pkt.receiverId);
+        if (outerIt == pending_.end()) {
+            // ACK removed entire receiver bucket → drop packet permanently
+            continue; // Try next packet
         }
+
+        auto& innerMap = outerIt->second;
+        auto innerIt = innerMap.find(pkt.id);
+        if (innerIt == innerMap.end()) {
+            // ACK removed just this packet → discard permanently
+            continue; // Try next packet
+        }
+
+        // Check resend delay
+        if (now - pkt.lastSentTime >= minDelay) {
+            pkt.lastSentTime = now;
+
+            // Reinsert at new position
+            orderedPendingPackets_.insert(std::move(nh));
+
+            outPacket = pkt;
+            return true;
+        }
+
+        // Not ready yet - reinsert exactly where it belongs
+        orderedPendingPackets_.insert(std::move(nh));
+
+        // Since this was the oldest packet and it's not ready,
+        // no later packets can be ready either (they’re all newer).
+        return false;
     }
-    return false; // nothing ready to be sent again
+
+    // No packets left
+    return false;
 }
 
 void PerfectLink::sendRaw(const std::string& payload, in_addr_t ip, unsigned short port){

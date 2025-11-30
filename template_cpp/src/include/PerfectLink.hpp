@@ -82,6 +82,13 @@ private:
         Clock::time_point lastSentTime = Clock::now() - std::chrono::milliseconds(100); // So that it sends the message immediately in sendMessageLoop
     };
 
+    // comparator that sorts by lastSentTime (oldest first)
+    struct PacketComparator {
+        bool operator()(Packet const& a, Packet const& b) const {
+            return a.lastSentTime < b.lastSentTime;
+        }
+    };
+
     std::unordered_map<unsigned long, std::string> partialPacket_; // receiverId, partialPacket
     std::unordered_map<unsigned long, Clock::time_point> lastPacketUpdateTime_; // So we can finish packet after enough time has past
 
@@ -89,6 +96,7 @@ private:
     std::unordered_map<unsigned long, std::atomic<unsigned long>> numMessagesInPacket_;
     const std::chrono::milliseconds maxPacketUpdateTimePast_ = std::chrono::milliseconds(500); // 500ms
     std::unordered_map<unsigned long, std::unordered_map<unsigned long, Packet>> pending_; // [receiverId][packetId]: Packet
+    std::set<Packet, PacketComparator> orderedPendingPackets_;
 
     std::unordered_map<unsigned long, std::vector<unsigned long>> pendingAcks_;
     const std::chrono::milliseconds maxAckUpdateTimePast_ = std::chrono::milliseconds(500); // 500ms
