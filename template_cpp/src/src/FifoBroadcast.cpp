@@ -227,14 +227,14 @@ bool FifoBroadcast::canDeliver(const Message &m) {
 
     DEBUGLOGRECEIVE("Checking if we can deliver  (" << p  << ", " << id << "):");
 
-    // (1) URB condition - If received acknowledgement from over half of processes we can deliver
+    // Check URB - If received acknowledgement from over half of processes we can deliver
     if (acknowledged_[m].size() <= numProcesses_ / 2) {
         DEBUGLOGRECEIVE("Don't have enough acknowledgements. Have only: " << acknowledged_[m].size());
         return false;
     }
 
     DEBUGLOGRECEIVE("Have enough acknowledgements " << "Next expected message ID is: " << nextExpectedMsgId_[p]);
-    // (2) FIFO condition: messages must be delivered in order
+    // Check FIFO - messages must be delivered in order
     return id == nextExpectedMsgId_[p];
 
 }
@@ -257,10 +257,10 @@ void FifoBroadcast::tryDeliverPending(unsigned long processId) {
                 return;
             }
 
-            // Only check the *first* (lowest-id) message
+            // Only check the first (lowest-id) message
             const Message &m = *bucket.begin();
 
-            // If we cannot deliver the FIRST pending message, STOP IMMEDIATELY
+            // If we cannot deliver the first pending message, stop
             if (!canDeliver(m)) {
                 DEBUGLOGRECEIVE("Cannot deliver next pending message ("<< m.origSenderId << ", " << m.messageId << "). Stopping tryDeliverPending.");
                 return;
@@ -273,7 +273,7 @@ void FifoBroadcast::tryDeliverPending(unsigned long processId) {
 
         if (canDeliverNow) {
             deliverMessage(toDeliver);  // this removes it from pending internally
-            // loop again to see if the *next* message is now ready
+            // loop again to see if the next message is now ready
         }
     }
 }

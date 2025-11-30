@@ -132,7 +132,7 @@ void PerfectLink::initReceiverBroadcaster() {
         close(sockfd_);
     }
 
-    // Set a receive timeout so recvfrom() in receiverLoop() won't block indefinitely.
+    // Set a receive timeout so recvfrom() in receiverLoop() won't block indefinitely
     struct timeval tv;
     tv.tv_sec = 0;
     tv.tv_usec = 100000; // 100 ms
@@ -240,7 +240,7 @@ void PerfectLink::flushPendingPacketIfReady(unsigned long receiverId) {
             shouldFlush = !partialPacket_[receiverId].empty();
         }
     } // Releases lock
-    if (shouldFlush) flushMessages(receiverId); // flushMessages does copy-and-call safely
+    if (shouldFlush) flushMessages(receiverId);
 }
 
 void PerfectLink::flushPendingPacketsIfReady() {
@@ -256,7 +256,7 @@ void PerfectLink::flushPendingPacketsIfReady() {
 
 void PerfectLink::sendPacketLoop() { 
     while (running_) {
-        // Try to flush partial packets first (keeps old behaviour)
+        // Try to flush partial packets
         flushPendingPacketsIfReady();
 
         Packet packetToSend;
@@ -266,7 +266,7 @@ void PerfectLink::sendPacketLoop() {
             DEBUGLOGSEND("Packets were sent too recently or pending_ was empty - waiting 10ms");
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
-            // Loop again and re-try findPacketToSend()
+            // Loop again and retry findPacketToSend()
             continue;
         }
 
@@ -311,7 +311,6 @@ bool PerfectLink::findPacketToSend(Packet& outPacket) {
         auto it = ret.position;
         pendingIndex_[key] = it;
 
-        // Output
         outPacket = pkt;
         return true;
     }
@@ -346,14 +345,14 @@ void PerfectLink::receiverLoop() {
                 // no data this iteration or interrupted, continue to let other activity proceed
                 continue;
             } else {
-                // real socket error
+                // raise socket error
                 perror("recvfrom");
                 continue;
             }
         }
 
         if (bytes == 0) {
-            // no data, continue
+            // no data so just continue
             continue;
         }
 
@@ -419,7 +418,7 @@ void PerfectLink::receiverLoop() {
             deliveredSet.insert(id);
             sendAck(senderAddr.sin_addr.s_addr, senderPort, id);
 
-            // Now replace the firstMissingMessageId and clean deliveredSet
+            // Replace the firstMissingMessageId and clean deliveredSet
             unsigned long prev = 0;
             bool gapFound = false;
             unsigned long lastValue = *deliveredSet.rbegin();
@@ -440,7 +439,7 @@ void PerfectLink::receiverLoop() {
                 }
             }
             if (!gapFound) {
-                // No gap found: all are in order
+                // No gap found - all are in order
                 DEBUGLOGRECEIVE("Didn't find gap so removing whole list");
                 firstMissingPacketId_[senderId] = lastValue + 1;
                 deliveredSet.clear();
@@ -560,12 +559,9 @@ void PerfectLink::sendAck(in_addr_t destIp, unsigned short destPort, unsigned lo
         // Increase count of ACKs in this batch
         numAcksInBatch_[destPort].fetch_add(1, std::memory_order_relaxed);
 
-        // Record the last update time to support timeout-based flushing
+        // Record the last update time - needed for flushing
         lastAckUpdateTime_[destPort] = now;
     }
-
-    // NOTE: We don't flush here.
-    // Flushing is controlled by the receiver loop calling flushAckBatch(), which checks batch size or timeout.
 }
 
 void PerfectLink::flushAckBatch(in_addr_t destIp, unsigned short destPort) {
@@ -583,7 +579,7 @@ void PerfectLink::flushAckBatch(in_addr_t destIp, unsigned short destPort) {
         if (count == 0)
             return; // nothing to do
 
-        // Check batching conditions
+        // Check enough time has past or we have enough acks
         lastUpdate = lastAckUpdateTime_[destPort];
         auto now = Clock::now();
         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastUpdate);
@@ -623,11 +619,11 @@ void PerfectLink::handleAck(const unsigned long receiverId, const unsigned long 
         auto it = pendingIndex_.find(key);
 
         if (it != pendingIndex_.end()) {
-            // Copy the packet BEFORE erasing it
+            // Copy the packet before erasing it
             acknowledgedPacket = *(it->second);
             hasPacket = true;
 
-            // Erase from set using iterator (fast)
+            // Erase from set using iterator
             orderedPendingPackets_.erase(it->second);
 
             // Erase from index
@@ -635,7 +631,7 @@ void PerfectLink::handleAck(const unsigned long receiverId, const unsigned long 
         }
     }
 
-    // Now safe to call callback outside the lock
+    // Call callback outside the lock
     if (hasPacket && ackCallback_) {
         handlePacketAck(receiverId, acknowledgedPacket);
     }
