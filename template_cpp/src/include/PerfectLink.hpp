@@ -89,14 +89,22 @@ private:
         }
     };
 
+    using Key = std::pair<unsigned long, unsigned long>; // (receiverId, packetId)
+
+    struct KeyHash {
+        size_t operator()(const Key& k) const noexcept {
+            return std::hash<unsigned long>()(k.first) ^ (std::hash<unsigned long>()(k.second) << 1);
+        }
+    };
+
     std::unordered_map<unsigned long, std::string> partialPacket_; // receiverId, partialPacket
     std::unordered_map<unsigned long, Clock::time_point> lastPacketUpdateTime_; // So we can finish packet after enough time has past
 
     const unsigned long maxMessagesPerPacket_ = 8;
     std::unordered_map<unsigned long, std::atomic<unsigned long>> numMessagesInPacket_;
     const std::chrono::milliseconds maxPacketUpdateTimePast_ = std::chrono::milliseconds(500); // 500ms
-    std::unordered_map<unsigned long, std::unordered_map<unsigned long, Packet>> pending_; // [receiverId][packetId]: Packet
     std::set<Packet, PacketComparator> orderedPendingPackets_;
+    std::unordered_map<Key, std::set<Packet>::iterator, KeyHash> pendingIndex_;
 
     std::unordered_map<unsigned long, std::vector<unsigned long>> pendingAcks_;
     const std::chrono::milliseconds maxAckUpdateTimePast_ = std::chrono::milliseconds(500); // 500ms

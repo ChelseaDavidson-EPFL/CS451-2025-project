@@ -214,17 +214,19 @@ void PerfectLink::flushMessages(unsigned long receiverId) {
 
 void PerfectLink::addPacketToPending(const std::string &packetStr, unsigned long receiverId) {
     if (packetStr.empty()) return;
-    
+
     packetSeqNumber_[receiverId]++;
-    Packet packet = Packet({receiverId, packetSeqNumber_[receiverId], packetStr});
+    Packet packet{receiverId, packetSeqNumber_[receiverId], packetStr};
     logSendPacket(packetStr);
     numMessagesInPacket_[receiverId] = 0;
-    
     { // lock pending map and assign packet id under that lock
         std::lock_guard<std::mutex> lockPending(pendingMapMutex_);
-        pending_[receiverId][packet.id] = packet;
-        orderedPendingPackets_.insert(packet);
-        DEBUGLOGSEND("Added packet id=" << packet.id << " to pending for receiverId: " << receiverId << ". pending_ size for this receiver id is =" << pending_[receiverId].size());
+
+        // Insert into ordered set
+        auto it = orderedPendingPackets_.insert(packet).first;
+
+        // Insert the iterator into lookup map
+        pendingIndex_[{receiverId, packet.id}] = it;
     }
     // Notify send thread that work is available
     pendingCv_.notify_one();
@@ -255,31 +257,30 @@ void PerfectLink::flushPendingPacketsIfReady() {
      }
 }
 
-void PerfectLink::sendPacketLoop() {
-    const std::chrono::milliseconds idleWait(100); // max wait
-    const std::chrono::milliseconds shortPoll(10); // small poll when no packets ready
+void PerfectLink::sendPacketLoop() { 
+    const std::chrono::milliseconds shortPoll(10);
 
     while (running_) {
         // Try to flush partial packets first (keeps old behaviour)
         flushPendingPacketsIfReady();
 
         Packet packetToSend;
+
+        // Try to find a packet to send
         if (!findPacketToSend(packetToSend)) {
-            // No ready packet; block for a short while or until notified
+            // No packet ready. Wait until notified or timeout.
             std::unique_lock<std::mutex> lk(pendingCvMutex_);
-            // Wait until new packet is available or timeout so flushPendingPacketsIfReady gets a chance again
-            pendingCv_.wait_for(lk, shortPoll, [this](){
+
+            pendingCv_.wait_for(lk, shortPoll, [this]() {
                 std::lock_guard<std::mutex> lock(pendingMapMutex_);
-                // quick check if there is any pending packet
-                for (const auto &outer : pending_) {
-                    if (!outer.second.empty()) return true;
-                }
-                return false;
+                return !orderedPendingPackets_.empty();
             });
-            // after wait_for, loop again to try findPacketToSend()
+
+            // Loop again and re-try findPacketToSend()
             continue;
         }
 
+        // We have a packet so send it
         std::string payload = std::to_string(packetToSend.id) + "|" + packetToSend.messages;
         DEBUGLOGSEND("Sending packet id:" << packetToSend.id << " messages: " << packetToSend.messages);
         auto [receiverIp, receiverPort] = hostMapById_[packetToSend.receiverId];
@@ -288,52 +289,43 @@ void PerfectLink::sendPacketLoop() {
     }
 }
 
-bool PerfectLink::findPacketToSend(Packet& outPacket) {  
+bool PerfectLink::findPacketToSend(Packet& outPacket) {
     auto now = Clock::now();
     const std::chrono::milliseconds minDelay(100);
 
     std::lock_guard<std::mutex> lock(pendingMapMutex_);
 
-    while (!orderedPendingPackets_.empty()) {
+    if (orderedPendingPackets_.empty())
+        return false;
 
-        // Extract oldest element
+    while (!orderedPendingPackets_.empty()) {
+        // Extract oldest
         auto nh = orderedPendingPackets_.extract(orderedPendingPackets_.begin());
         Packet& pkt = nh.value();
+        Key key{pkt.receiverId, pkt.id};
 
-        // Check if packet was acknowledged
-        auto outerIt = pending_.find(pkt.receiverId);
-        if (outerIt == pending_.end()) {
-            // ACK removed entire receiver bucket → drop packet permanently
-            continue; // Try next packet
+        // Delay check
+        if (now - pkt.lastSentTime < minDelay) {
+            // reinsert and stop searching
+            auto ret = orderedPendingPackets_.insert(std::move(nh));
+            auto it = ret.position;
+            pendingIndex_[key] = it;
+            return false;
         }
 
-        auto& innerMap = outerIt->second;
-        auto innerIt = innerMap.find(pkt.id);
-        if (innerIt == innerMap.end()) {
-            // ACK removed just this packet → discard permanently
-            continue; // Try next packet
-        }
+        // Update send time
+        pkt.lastSentTime = now;
 
-        // Check resend delay
-        if (now - pkt.lastSentTime >= minDelay) {
-            pkt.lastSentTime = now;
+        // Reinsert with updated key
+        auto ret = orderedPendingPackets_.insert(std::move(nh));
+        auto it = ret.position;
+        pendingIndex_[key] = it;
 
-            // Reinsert at new position
-            orderedPendingPackets_.insert(std::move(nh));
-
-            outPacket = pkt;
-            return true;
-        }
-
-        // Not ready yet - reinsert exactly where it belongs
-        orderedPendingPackets_.insert(std::move(nh));
-
-        // Since this was the oldest packet and it's not ready,
-        // no later packets can be ready either (they’re all newer).
-        return false;
+        // Output
+        outPacket = pkt;
+        return true;
     }
 
-    // No packets left
     return false;
 }
 
@@ -635,14 +627,25 @@ void PerfectLink::handleAck(const unsigned long receiverId, const unsigned long 
     Packet acknowledgedPacket;
     bool hasPacket = false;
     {
-        std::lock_guard<std::mutex> lock(pendingMapMutex_); // Destroys and lock and releases mutex when out of scope
-        auto it = pending_[receiverId].find(pktId);
-        if (it != pending_[receiverId].end()) {
-            acknowledgedPacket = it->second;
+        std::lock_guard<std::mutex> lock(pendingMapMutex_);
+
+        Key key{receiverId, pktId};
+        auto it = pendingIndex_.find(key);
+
+        if (it != pendingIndex_.end()) {
+            // Copy the packet BEFORE erasing it
+            acknowledgedPacket = *(it->second);
             hasPacket = true;
-            pending_[receiverId].erase(it);
+
+            // Erase from set using iterator (fast)
+            orderedPendingPackets_.erase(it->second);
+
+            // Erase from index
+            pendingIndex_.erase(it);
         }
     }
+
+    // Now safe to call callback outside the lock
     if (hasPacket && ackCallback_) {
         handlePacketAck(receiverId, acknowledgedPacket);
     }
