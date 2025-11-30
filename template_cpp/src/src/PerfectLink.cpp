@@ -15,6 +15,7 @@
 // #define DEBUGSEND
 // #define DEBUGRECEIVE
 // #define DEBUGACK
+// #define DEBUGSENDACK
 
 // Debug logging
 #ifdef DEBUGSEND
@@ -39,6 +40,12 @@
     #define DEBUGLOGACK(msg) (std::cout << msg << std::endl)
 #else
     #define DEBUGLOGACK(msg) do {} while(0) // no-op in release
+#endif
+
+#ifdef DEBUGSENDACK
+    #define DEBUGLOGSENDACK(msg) (std::cout << msg << std::endl)
+#else
+    #define DEBUGLOGSENDACK(msg) do {} while(0) // no-op in release
 #endif
 
 PerfectLink::PerfectLink(unsigned long myProcessId, in_addr_t myProcessIp, unsigned short myProcessPort, std::unordered_map<unsigned short, std::pair<unsigned long, in_addr_t>> hostMapByPort, std::unordered_map<unsigned long, std::pair<in_addr_t, unsigned short>> hostMapById, std::string logPath)
@@ -73,8 +80,11 @@ PerfectLink::PerfectLink(unsigned long myProcessId, in_addr_t myProcessIp, unsig
 
         // Receiver logic - this process behaving as a receiver
         firstMissingPacketId_[processId] = 1;     // Cleaning logic - Initialize first missing packet for each sender process to 1 - waiting for first packet to arrive
+
+        // Initialise ack batches
+        numAcksInBatch_[processId] = 0;
+        lastAckUpdateTime_[processId] = Clock::now();
     }
-   
 
     // Start listening on ports
     initReceiverBroadcaster();
@@ -348,13 +358,17 @@ void PerfectLink::receiverLoop() {
         unsigned long senderId = hostMapByPort_[senderPort].first;
 
         // Extract message type
-        if (payload.rfind("ACK:", 0) == 0) {
-            std::string pktIdStr = payload.substr(4);
-            unsigned long pktId = parsePacketPayloadId(pktIdStr);
-            if (pktId == 0) { // TODO - add more meaningful error
-                continue;
+        if (payload.rfind("ACKLIST:", 0) == 0) {
+            std::string idsStr = payload.substr(8);
+            std::stringstream ss(idsStr);
+            std::string idTok;
+
+            while (std::getline(ss, idTok, ',')) {
+                unsigned long pktId = parsePacketPayloadId(idTok);
+                if (pktId > 0) {
+                    handleAck(senderId, pktId);
+                }
             }
-            handleAck(senderId, pktId); // "senderId" in this case is the process we SENT a message to and has now acknowledged, so they are technically the receiverId
             continue;
         }
 
@@ -447,6 +461,7 @@ void PerfectLink::receiverLoop() {
         DEBUGLOGRECEIVE("Delivered list at end off the receiver processing");
         printDelivered();
         DEBUGLOGRECEIVE("firstMissing at end of the receiver processing: " << firstMissingPacketId_[senderId]);
+        flushAckBatch(senderAddr.sin_addr.s_addr, senderPort);
     }
 }
 
@@ -528,8 +543,68 @@ bool PerfectLink::deliverMessage(unsigned long senderId, const std::string& mess
 }
 
 void PerfectLink::sendAck(in_addr_t destIp, unsigned short destPort, unsigned long packetId) {
-    std::string ack = "ACK:" + std::to_string(packetId);
-    sendRaw(ack, destIp, destPort);
+    const auto now = Clock::now();
+
+    {
+        std::lock_guard<std::mutex> lock(ackMutex_);
+
+        // Append the ACK to the pending vector
+        pendingAcks_[destPort].push_back(packetId);
+
+        // Increase count of ACKs in this batch
+        numAcksInBatch_[destPort].fetch_add(1, std::memory_order_relaxed);
+
+        // Record the last update time to support timeout-based flushing
+        lastAckUpdateTime_[destPort] = now;
+    }
+
+    // NOTE: We don't flush here.
+    // Flushing is controlled by the receiver loop calling flushAckBatch(), which checks batch size or timeout.
+}
+
+void PerfectLink::flushAckBatch(in_addr_t destIp, unsigned short destPort) {
+    std::vector<unsigned long> list;
+    bool shouldFlush = false;
+    Clock::time_point lastUpdate;
+
+    {
+        std::lock_guard<std::mutex> lock(ackMutex_);
+
+        auto &vec = pendingAcks_[destPort];
+        unsigned long count =
+            numAcksInBatch_.count(destPort) ? numAcksInBatch_[destPort].load() : 0;
+
+        if (count == 0)
+            return; // nothing to do
+
+        // Check batching conditions
+        lastUpdate = lastAckUpdateTime_[destPort];
+        auto now = Clock::now();
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastUpdate);
+
+        if (count >= maxAcksPerBatch_ || elapsed >= maxAckUpdateTimePast_) {
+            shouldFlush = true;
+
+            // Move the batch out
+            list.swap(vec);
+            numAcksInBatch_[destPort].store(0);
+        }
+    }
+
+    if (!shouldFlush)
+        return;
+
+    // Build batched ACK payload
+    std::string payload = "ACKLIST:";
+    for (size_t i = 0; i < list.size(); ++i) {
+        payload += std::to_string(list[i]);
+        if (i + 1 < list.size()) payload += ",";
+    }
+
+    DEBUGLOGSENDACK("Flushing ACK batch (" << list.size() << " acks): "
+                      << payload);
+
+    sendRaw(payload, destIp, destPort);
 }
 
 void PerfectLink::handleAck(const unsigned long receiverId, const unsigned long pktId) {

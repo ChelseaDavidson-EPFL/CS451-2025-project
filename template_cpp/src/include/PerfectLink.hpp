@@ -90,11 +90,19 @@ private:
     const std::chrono::milliseconds maxPacketUpdateTimePast_ = std::chrono::milliseconds(500); // 500ms
     std::unordered_map<unsigned long, std::unordered_map<unsigned long, Packet>> pending_; // [receiverId][packetId]: Packet
 
+    std::unordered_map<unsigned long, std::vector<unsigned long>> pendingAcks_;
+    const std::chrono::milliseconds maxAckUpdateTimePast_ = std::chrono::milliseconds(500); // 500ms
+    std::unordered_map<unsigned long, Clock::time_point> lastAckUpdateTime_; // lastAckUpdateTime_[receiverId] = last time ack was updated
+    std::unordered_map<unsigned long, std::atomic<unsigned long>> numAcksInBatch_; // numAcksInBatch_[receiverId] = number of acks we have in that batch
+    const unsigned long maxAcksPerBatch_ = 8;
+
+
     std::mutex pendingMapMutex_;
     std::mutex partialPacketMutex_;
     std::mutex loggingMutex_;
     std::mutex pendingCvMutex_;
     std::condition_variable pendingCv_;
+    std::mutex ackMutex_;
 
     std::unordered_map<unsigned long, std::atomic<unsigned long>> packetSeqNumber_; // receiverId, seqNum
     std::function<void(Message, unsigned long)> deliverCallback_;
@@ -117,6 +125,7 @@ private:
     bool deliverMessages(unsigned long senderId, const std::string& messages);
     bool deliverMessage(unsigned long senderId, const std::string& messagePayload);
     void sendAck(in_addr_t destIp, unsigned short destPort, unsigned long packetId);
+    void flushAckBatch(in_addr_t destIp, unsigned short destPort);
     void handleAck(const unsigned long receiverId, const unsigned long pktId);
     void handlePacketAck(unsigned long receiverId, Packet acknowledgedPacket);
     void logDelivery(unsigned long senderId, unsigned long messageId);
