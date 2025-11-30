@@ -219,17 +219,14 @@ void PerfectLink::addPacketToPending(const std::string &packetStr, unsigned long
     Packet packet{receiverId, packetSeqNumber_[receiverId], packetStr};
     logSendPacket(packetStr);
     numMessagesInPacket_[receiverId] = 0;
-    { // lock pending map and assign packet id under that lock
-        std::lock_guard<std::mutex> lockPending(pendingMapMutex_);
+    // lock pending map and assign packet id under that lock
+    std::lock_guard<std::mutex> lockPending(pendingMapMutex_);
 
-        // Insert into ordered set
-        auto it = orderedPendingPackets_.insert(packet).first;
+    // Insert into ordered set
+    auto it = orderedPendingPackets_.insert(packet).first;
 
-        // Insert the iterator into lookup map
-        pendingIndex_[{receiverId, packet.id}] = it;
-    }
-    // Notify send thread that work is available
-    pendingCv_.notify_one();
+    // Insert the iterator into lookup map
+    pendingIndex_[{receiverId, packet.id}] = it;
 }
 
 void PerfectLink::flushPendingPacketIfReady(unsigned long receiverId) {
@@ -258,8 +255,6 @@ void PerfectLink::flushPendingPacketsIfReady() {
 }
 
 void PerfectLink::sendPacketLoop() { 
-    const std::chrono::milliseconds shortPoll(10);
-
     while (running_) {
         // Try to flush partial packets first (keeps old behaviour)
         flushPendingPacketsIfReady();
@@ -267,14 +262,9 @@ void PerfectLink::sendPacketLoop() {
         Packet packetToSend;
 
         // Try to find a packet to send
-        if (!findPacketToSend(packetToSend)) {
-            // No packet ready. Wait until notified or timeout.
-            std::unique_lock<std::mutex> lk(pendingCvMutex_);
-
-            pendingCv_.wait_for(lk, shortPoll, [this]() {
-                std::lock_guard<std::mutex> lock(pendingMapMutex_);
-                return !orderedPendingPackets_.empty();
-            });
+        if (!findPacketToSend(packetToSend)) {  // Updating packetToSend with the packet that is ready to be sent
+            DEBUGLOGSEND("Packets were sent too recently or pending_ was empty - waiting 10ms");
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
             // Loop again and re-try findPacketToSend()
             continue;

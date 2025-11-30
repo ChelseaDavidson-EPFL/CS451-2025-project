@@ -97,6 +97,7 @@ FifoBroadcast::~FifoBroadcast() {
 void FifoBroadcast::broadcast(const std::string& message) {    
     // Add this message to the pending list for this process:
     unsigned long msgId = ++msgSeqNumber_;
+    logBroadcast(msgId);
     Message pendingMessage{myProcessId_, msgId, message};
 
     {   // lock shared state
@@ -104,8 +105,6 @@ void FifoBroadcast::broadcast(const std::string& message) {
         pendingDelivery_[pendingMessage.origSenderId].insert(pendingMessage);
         acknowledged_[pendingMessage].insert(myProcessId_);
     }
-
-    logBroadcast(msgId);
 
     // send to other processes (no lock, avoids deadlock)
     sendMessageToAllProcesses(pendingMessage);
