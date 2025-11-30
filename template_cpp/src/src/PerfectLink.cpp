@@ -214,34 +214,22 @@ void PerfectLink::flushMessages(unsigned long receiverId) {
 
 void PerfectLink::addPacketToPending(const std::string &packetStr, unsigned long receiverId) {
     if (packetStr.empty()) return;
-
+    
     packetSeqNumber_[receiverId]++;
     Packet packet = Packet({receiverId, packetSeqNumber_[receiverId], packetStr});
     logSendPacket(packetStr);
     numMessagesInPacket_[receiverId] = 0;
-
+    
     { // lock pending map and assign packet id under that lock
         std::lock_guard<std::mutex> lockPending(pendingMapMutex_);
         pending_[receiverId][packet.id] = packet;
         DEBUGLOGSEND("Added packet id=" << packet.id << " to pending for receiverId: " << receiverId << ". pending_ size for this receiver id is =" << pending_[receiverId].size());
     }
-
-    // Schedule first resend attempt (push task into heap)
-    {
-        std::lock_guard<std::mutex> lk(heapMutex_);
-        ResendTask t;
-        t.receiverId = receiverId;
-        t.pktId = packet.id;
-        t.nextSendTime = Clock::now(); // send immediately (or add small jitter if you like)
-        resendHeap_.push(std::move(t));
-    }
-    heapCv_.notify_one();
-
-    // Notify send thread that work is available (keeps compatibility with existing condition variable)
+    // Notify send thread that work is available
     pendingCv_.notify_one();
 }
 
-void PerfectLink::flushPartialPacketIfReady(unsigned long receiverId) {
+void PerfectLink::flushPendingPacketIfReady(unsigned long receiverId) {
     bool shouldFlush = false;
     { // Holding partialPacketMutex_
         std::lock_guard<std::mutex> lock(partialPacketMutex_);
@@ -255,91 +243,74 @@ void PerfectLink::flushPartialPacketIfReady(unsigned long receiverId) {
     if (shouldFlush) flushMessages(receiverId); // flushMessages does copy-and-call safely
 }
 
-void PerfectLink::flushPartialPacketsIfReady() {
+void PerfectLink::flushPendingPacketsIfReady() {
      for (const auto& [processId, _] : hostMapById_) {
         // Skip it's own process  // TODO - is this correct?
         if (processId == myProcessId_) {
             continue;
         }
 
-        flushPartialPacketIfReady(processId);
+        flushPendingPacketIfReady(processId);
      }
 }
 
 void PerfectLink::sendPacketLoop() {
-    // Resend thread main loop: driven by resendHeap_. We also keep compatibility with pendingCv_ notifications.
+    const std::chrono::milliseconds idleWait(100); // max wait
+    const std::chrono::milliseconds shortPoll(10); // small poll when no packets ready
+
     while (running_) {
-        flushPartialPacketsIfReady();
-        ResendTask task;
-        bool haveTask = false;
+        // Try to flush partial packets first (keeps old behaviour)
+        flushPendingPacketsIfReady();
 
-        {   // determine next task/time safely
-            std::unique_lock<std::mutex> lk(heapMutex_);
-            while (running_ && resendHeap_.empty()) {
-                // wait until something scheduled
-                heapCv_.wait(lk);
-            }
-            if (!running_) break;
-
-            // peek top
-            auto top = resendHeap_.top();
-            auto now = Clock::now();
-            if (top.nextSendTime > now) {
-                // wait until the top task becomes due or a new earlier task arrives
-                heapCv_.wait_until(lk, top.nextSendTime);
-                // go back to top of loop to re-evaluate conditions
-                continue;
-            }
-
-            // Pop the due task
-            task = top;
-            resendHeap_.pop();
-            haveTask = true;
-        }
-
-        if (!haveTask) continue;       
-
-        // Lookup the packet in pending_ and check it's still there (under pendingMapMutex_)
         Packet packetToSend;
-        bool exists = false;
-        {
-            std::lock_guard<std::mutex> lock(pendingMapMutex_);
-            auto oit = pending_.find(task.receiverId);
-            if (oit != pending_.end()) {
-                auto it = oit->second.find(task.pktId);
-                if (it != oit->second.end()) {
-                    packetToSend = it->second;
-                    exists = true;
+        if (!findPacketToSend(packetToSend)) {
+            // No ready packet; block for a short while or until notified
+            std::unique_lock<std::mutex> lk(pendingCvMutex_);
+            // Wait until new packet is available or timeout so flushPendingPacketsIfReady gets a chance again
+            pendingCv_.wait_for(lk, shortPoll, [this](){
+                std::lock_guard<std::mutex> lock(pendingMapMutex_);
+                // quick check if there is any pending packet
+                for (const auto &outer : pending_) {
+                    if (!outer.second.empty()) return true;
                 }
-            }
-        }
-
-        if (!exists) {
-            // Somebody removed it concurrently (ack arrived), so this is a stale task
+                return false;
+            });
+            // after wait_for, loop again to try findPacketToSend()
             continue;
         }
 
-        // Now actually send the packet
         std::string payload = std::to_string(packetToSend.id) + "|" + packetToSend.messages;
         DEBUGLOGSEND("Sending packet id:" << packetToSend.id << " messages: " << packetToSend.messages);
         auto [receiverIp, receiverPort] = hostMapById_[packetToSend.receiverId];
         DEBUGLOGACK("Sending packet with payload: "<< payload << " to process " << packetToSend.receiverId);
         sendRaw(payload, receiverIp, receiverPort);
+    }
+}
 
-        // Reschedule next resend for this packet. Schedule at now + retransmitInterval_
-        {
-            std::lock_guard<std::mutex> lk(heapMutex_);
-            ResendTask nextTask;
-            nextTask.receiverId = task.receiverId;
-            nextTask.pktId = task.pktId;
-            nextTask.nextSendTime = Clock::now() + retransmitInterval_;
-            resendHeap_.push(std::move(nextTask));
-            // notify is not required here because we are running the thread already, but keep symmetric signaling
-            heapCv_.notify_one();
+bool PerfectLink::findPacketToSend(Packet& outPacket) { // Finds a packet in pending_ that hasn't been sent too recently
+    auto now = Clock::now();
+    const std::chrono::milliseconds minDelay(100);
+
+    std::lock_guard<std::mutex> lock(pendingMapMutex_);
+
+    // Loop through outer map
+    for (auto& outerEntry : pending_) {
+        // outerEntry.first is the outer key
+        // outerEntry.second is the inner map
+        auto& innerMap = outerEntry.second;
+
+        // Loop through inner map // TODO - is this going to always prioritise the packets being sent to the lowest processIds?
+        for (auto& innerEntry : innerMap) {
+            Packet& pkt = innerEntry.second;
+
+            if (now - pkt.lastSentTime > minDelay) {
+                pkt.lastSentTime = now;  // update while holding lock
+                outPacket = pkt;         // make a safe copy
+                return true;
+            }
         }
-    } // while running_
-
-    DEBUGLOG("sendPacketLoop exiting");
+    }
+    return false; // nothing ready to be sent again
 }
 
 void PerfectLink::sendRaw(const std::string& payload, in_addr_t ip, unsigned short port){
@@ -358,6 +329,8 @@ void PerfectLink::receiverLoop() {
     socklen_t senderLen = sizeof(senderAddr);
 
     while (running_) {
+        // DEBUGLOG("listening...");
+
         ssize_t bytes = recvfrom(sockfd_, buffer, sizeof(buffer)-1, 0,
                     reinterpret_cast<sockaddr*>(&senderAddr), &senderLen);
 
@@ -384,7 +357,7 @@ void PerfectLink::receiverLoop() {
         unsigned short senderPort = ntohs(senderAddr.sin_port);
         unsigned long senderId = hostMapByPort_[senderPort].first;
 
-        // Handle ACKLIST:
+        // Extract message type
         if (payload.rfind("ACKLIST:", 0) == 0) {
             std::string idsStr = payload.substr(8);
             std::stringstream ss(idsStr);
@@ -399,7 +372,7 @@ void PerfectLink::receiverLoop() {
             continue;
         }
 
-        // Parse normal packet
+        // Parse as normal message
         size_t sep = payload.find('|');
         if (sep == std::string::npos) {
             std::cerr << "Incorrect payload format" << std::endl;
@@ -409,73 +382,88 @@ void PerfectLink::receiverLoop() {
         // Get message info
         std::string idStr = payload.substr(0, sep);
         unsigned long id = parsePacketPayloadId(idStr);
-        if (id == 0) continue;
+        if (id == 0) { // TODO - Add more meaningful error
+            continue;
+        }
         std::string messages = payload.substr(sep + 1);
-
         unsigned long firstMissingPacketId = firstMissingPacketId_[senderId];
-        DEBUGLOGRECEIVE("Received packet id=" << id << " from sender=" << senderId);
+        DEBUGLOGRECEIVE("Just received (ProcessID, idStr): " << senderId << ", " << id);
 
-        // Quick path: already delivered and cleaned
-        if (id < firstMissingPacketId) {
-            // send ack again in case sender missed it
-            sendAck(senderAddr.sin_addr.s_addr, senderPort, id);
+        DEBUGLOGRECEIVE("Delivered at start of receive process");
+        printDelivered();
+        DEBUGLOGRECEIVE("First missing packet at start is: " << firstMissingPacketId);
+        // Check if already delivered:
+        if (id < firstMissingPacketId) { // Already delivered it but it has been cleaned from delivered_
+            sendAck(senderAddr.sin_addr.s_addr, senderPort, id); // Send ack again in case they didn't receive it
             DEBUGLOGRECEIVE("Already delivered " << id << " from " << senderId << " so skipping");
             continue;
         }
+        
+        // Find delivered list for this processId
+        auto& deliveredSet = delivered_[senderId]; // TODO - do I need a mutex lock here?
+    
 
-        // We will reference delivered_[senderId] — lock just while mutating it
-        {
-            // delivered_ is presumably a map<unsigned long, std::set<unsigned long>>
-            auto &deliveredSet = delivered_[senderId];
+        if (id == firstMissingPacketId) { // The one we've been waiting for so deliver it
+            DEBUGLOGRECEIVE("Just received firstMissingMessageId so attempting to deliver and clean delivered");
+            if (!deliverMessages(senderId, messages)) { // Couldn't deliver one or more of the messages, so don't acknowledge
+                DEBUGLOGRECEIVE("Failed to deliver one or more of the messages so skipping this packet");
+                std::cerr << "Failed to deliver one or more of the messages so skipping packet with id: " << id << std::endl;
+                continue;
+            } 
+            deliveredSet.insert(id);
+            sendAck(senderAddr.sin_addr.s_addr, senderPort, id);
 
-            if (id == firstMissingPacketId) {
-                DEBUGLOGRECEIVE("Received expected packet id " << id << " from " << senderId << ". Attempting to deliver.");
-                if (!deliverMessages(senderId, messages)) {
-                    DEBUGLOGRECEIVE("Failed to deliver messages from packet " << id << " — skipping ack");
-                    std::cerr << "Failed to deliver one or more of the messages so skipping packet with id: " << id << std::endl;
-                    continue;
-                }
-                // record as delivered
-                deliveredSet.insert(id);
-                sendAck(senderAddr.sin_addr.s_addr, senderPort, id);
-
-                // --- SAFELY advance firstMissingPacketId_ by consuming consecutive entries ---
-                // Instead of iterating and erasing while iterating (unsafe), do a simple while loop:
-                while (deliveredSet.find(firstMissingPacketId) != deliveredSet.end()) {
-                    // remove the entry and increment the expected counter
-                    deliveredSet.erase(firstMissingPacketId);
-                    firstMissingPacketId++;
-                }
-                // update stored firstMissing
-                firstMissingPacketId_[senderId] = firstMissingPacketId;
-
-            } else {
-                // id > firstMissingPacketId: buffer it (if new) and ack
-                auto it = deliveredSet.find(id);
-                if (it != deliveredSet.end()) {
-                    // Already buffered/delivered; re-ack in case sender needs it
-                    sendAck(senderAddr.sin_addr.s_addr, senderPort, id);
-                    DEBUGLOGRECEIVE("Packet " << id << " already in deliveredSet for " << senderId);
-                    // no other action
-                } else {
-                    // Attempt to deliver messages (this will call your deliverCallback which may depend on FIFO)
-                    if (!deliverMessages(senderId, messages)) {
-                        DEBUGLOGRECEIVE("Failed to deliver messages from packet " << id << " — skipping ack");
-                        std::cerr << "Failed to deliver one or more of the messages so skipping packet with id: " << id << std::endl;
-                        continue;
+            // Now replace the firstMissingMessageId and clean deliveredSet
+            unsigned long prev = 0;
+            bool gapFound = false;
+            unsigned long lastValue = *deliveredSet.rbegin();
+            for (unsigned long msgId : deliveredSet) {
+                if (prev == 0) { // At the first value so skip
+                    prev = msgId;
+                } else { // Not at the first value
+                    if (prev + 1 != msgId) { // Found the gap
+                        DEBUGLOGRECEIVE("Found the gap so removing up to gap");
+                        deliveredSet.erase(prev);
+                        firstMissingPacketId_[senderId] = prev + 1;
+                        gapFound = true;
+                        break;
+                    } else { // Haven't found the gap but can keep cleaning
+                        deliveredSet.erase(prev);
+                        prev = msgId;
                     }
-                    // Insert into delivered set for future gap filling
-                    deliveredSet.insert(id);
-                    sendAck(senderAddr.sin_addr.s_addr, senderPort, id);
                 }
             }
-        } // end scope for deliveredSet mutation
+            if (!gapFound) {
+                // No gap found: all are in order
+                DEBUGLOGRECEIVE("Didn't find gap so removing whole list");
+                firstMissingPacketId_[senderId] = lastValue + 1;
+                deliveredSet.clear();
+            }
 
-        // After processing, flush ack batch to the remote peer
+        } else { // Either in our delivered set or never been delivered
+            auto it = deliveredSet.find(id);
+
+            if (it != deliveredSet.end()) { // Already in our list
+                DEBUGLOGRECEIVE("Message was in delivered list");
+                sendAck(senderAddr.sin_addr.s_addr, senderPort, id); // Send ack again in case they didn't receive it
+                continue;
+            } else { // Not in our list so add and deliver it
+                DEBUGLOGRECEIVE("Message not in delivered list and wasn't one we were waiting for so we're delivering it and adding it to our list");
+                if (!deliverMessages(senderId, messages)) { // Couldn't deliver one or more of the messages, so don't acknowledge
+                    DEBUGLOGRECEIVE("Failed to deliver one or more of the messages so skipping this packet");
+                    std::cerr << "Failed to deliver one or more of the messages so skipping packet with id: " << id << std::endl;
+                    continue;
+                } 
+                deliveredSet.insert(id);
+                sendAck(senderAddr.sin_addr.s_addr, senderPort, id);
+            }
+        }
+        DEBUGLOGRECEIVE("Delivered list at end off the receiver processing");
+        printDelivered();
+        DEBUGLOGRECEIVE("firstMissing at end of the receiver processing: " << firstMissingPacketId_[senderId]);
         flushAckBatch(senderAddr.sin_addr.s_addr, senderPort);
-    } // while running_
+    }
 }
-
 
 unsigned long PerfectLink::parsePacketPayloadId(const std::string& packetIdStr) {
     try {
@@ -623,23 +611,14 @@ void PerfectLink::handleAck(const unsigned long receiverId, const unsigned long 
     Packet acknowledgedPacket;
     bool hasPacket = false;
     {
-        std::lock_guard<std::mutex> lock(pendingMapMutex_);
-        auto itOuter = pending_.find(receiverId);
-        if (itOuter != pending_.end()) {
-            auto it = itOuter->second.find(pktId);
-            if (it != itOuter->second.end()) {
-                acknowledgedPacket = it->second;
-                hasPacket = true;
-                itOuter->second.erase(it);
-                // if the inner map becomes empty, erase the outer entry:
-                if (itOuter->second.empty()) pending_.erase(itOuter);
-            }
+        std::lock_guard<std::mutex> lock(pendingMapMutex_); // Destroys and lock and releases mutex when out of scope
+        auto it = pending_[receiverId].find(pktId);
+        if (it != pending_[receiverId].end()) {
+            acknowledgedPacket = it->second;
+            hasPacket = true;
+            pending_[receiverId].erase(it);
         }
     }
-
-    // Notify heap thread in case the top was cancelled (ie. it was just acked) (so it can pop quickly)
-    heapCv_.notify_one();
-
     if (hasPacket && ackCallback_) {
         handlePacketAck(receiverId, acknowledgedPacket);
     }
@@ -750,9 +729,6 @@ void PerfectLink::logSendMessage(const std::string& messageIds) {
 
 void PerfectLink::stop() {
     running_ = false;
-    // Wake threads waiting on condition variables
-    heapCv_.notify_all();
-    pendingCv_.notify_all();
     if (receiverThread_.joinable()) receiverThread_.join();
     if (resendThread_.joinable()) resendThread_.join();
     if (loggingToFile_ && logFile_.is_open()) {

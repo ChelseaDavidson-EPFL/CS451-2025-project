@@ -4,7 +4,6 @@
 #include <atomic>
 #include <thread>
 #include <unordered_map>
-#include <vector>
 #include <functional>
 #include <map>
 #include <list>
@@ -12,7 +11,6 @@
 #include <condition_variable>
 #include <ctime>
 #include <set>
-#include <unordered_set>
 
 struct Message {
     unsigned long origSenderId; // Id of original sender
@@ -44,38 +42,6 @@ namespace std {
         }
     };
 }
-
-template <typename T, typename Compare = std::greater<T>>
-class MinHeap {
-public:
-    MinHeap() : comp_() {}
-
-    bool empty() const {
-        return data_.empty();
-    }
-
-    size_t size() const {
-        return data_.size();
-    }
-
-    const T& top() const {
-        return data_.front();
-    }
-
-    void push(const T& value) {
-        data_.push_back(value);
-        std::push_heap(data_.begin(), data_.end(), comp_);
-    }
-
-    void pop() {
-        std::pop_heap(data_.begin(), data_.end(), comp_);
-        data_.pop_back();
-    }
-
-private:
-    std::vector<T> data_;
-    Compare comp_;
-};
 
 class PerfectLink {
 public:
@@ -116,23 +82,6 @@ private:
         Clock::time_point lastSentTime = Clock::now() - std::chrono::milliseconds(100); // So that it sends the message immediately in sendMessageLoop
     };
 
-    // resend heap entry
-    struct ResendTask {
-        std::chrono::steady_clock::time_point nextSendTime;
-        unsigned long receiverId;
-        unsigned long pktId;
-
-        bool operator>(ResendTask const& o) const {
-            return nextSendTime > o.nextSendTime;
-        }
-    };
-
-    // Priority queue (min-heap) of resend tasks
-    MinHeap<ResendTask, std::greater<ResendTask>> resendHeap_;
-    std::condition_variable heapCv_;      // notifies resend thread of new tasks or earlier deadlines
-
-    std::chrono::milliseconds retransmitInterval_{100}; // base retransmit delay (tunable)
-
     std::unordered_map<unsigned long, std::string> partialPacket_; // receiverId, partialPacket
     std::unordered_map<unsigned long, Clock::time_point> lastPacketUpdateTime_; // So we can finish packet after enough time has past
 
@@ -149,7 +98,6 @@ private:
 
 
     std::mutex pendingMapMutex_;
-    std::mutex heapMutex_;                // protects resendHeap_
     std::mutex partialPacketMutex_;
     std::mutex loggingMutex_;
     std::mutex pendingCvMutex_;
@@ -166,9 +114,10 @@ private:
     void addMessageToPacket(const std::string& messagePayload, unsigned long receiverId) ;
     void flushMessages(unsigned long receiverId);
     void addPacketToPending(const std::string &packetStr, unsigned long receiverId);
-    void flushPartialPacketIfReady(unsigned long receiverId);
-    void flushPartialPacketsIfReady();
+    void flushPendingPacketIfReady(unsigned long receiverId);
+    void flushPendingPacketsIfReady();
     void sendPacketLoop();
+    bool findPacketToSend(Packet& packet);
     void sendRaw(const std::string& payload, in_addr_t ip, unsigned short port);
     void receiverLoop();
     unsigned long parsePacketPayloadId(const std::string& packetIdStr);
