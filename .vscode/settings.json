@@ -71,6 +71,8 @@
         "deque": "cpp",
         "queue": "cpp",
         "set": "cpp",
-        "cerrno": "cpp"
+        "cerrno": "cpp",
+        "condition_variable": "cpp",
+        "unordered_set": "cpp"
     }
 }
