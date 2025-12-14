@@ -1,5 +1,4 @@
 #pragma once
-
 #include <netdb.h>
 #include <atomic>
 #include <thread>
@@ -11,11 +10,49 @@
 #include <condition_variable>
 #include <ctime>
 #include <set>
+#include <variant>
+
+enum class MessagePayloadType : uint8_t {
+    INT      = 0x01,
+    INT_LIST = 0x02
+};
+
+#pragma pack(push, 1)
+
+enum class PacketType : uint8_t {
+    DATA = 0,
+    ACK  = 1
+};
+
+struct DataPacketHeader {
+    uint8_t type;
+    unsigned long id;
+    uint32_t numMessages; 
+};
+
+struct AckPacketHeader {
+    uint8_t  type;        // PacketType::ACK
+    uint32_t numAcks;
+};
+
+struct MessageHeader {
+    uint64_t origSenderId;
+    uint64_t messageId;
+    uint8_t  payloadType;   // MessagePayloadType
+    uint32_t payloadSize;   // bytes following
+};
+
+#pragma pack(pop)
+
+using MessagePayload = std::variant<
+    uint64_t,
+    std::vector<uint64_t>
+>;
 
 struct Message {
-    unsigned long origSenderId; // Id of original sender
-    unsigned long messageId;
-    std::string content;
+    uint64_t origSenderId;
+    uint64_t messageId;
+    MessagePayload content;
 
     bool operator==(const Message& other) const {
         return origSenderId == other.origSenderId &&
@@ -30,15 +67,55 @@ struct Message {
     }
 };
 
+template <typename T>
+void appendBytes(std::vector<uint8_t>& buf, const T& val) {
+    static_assert(std::is_trivially_copyable_v<T>);
+    const uint8_t* p = reinterpret_cast<const uint8_t*>(&val);
+    buf.insert(buf.end(), p, p + sizeof(T));
+}
+
 // Make Message hashable so it can be used as a key in a map
 namespace std {
     template<>
     struct hash<Message> {
-        std::size_t operator()(const Message& m) const noexcept {
-            std::size_t h1 = std::hash<unsigned long>{}(m.origSenderId);
-            std::size_t h2 = std::hash<unsigned long>{}(m.messageId);
-            std::size_t h3 = std::hash<std::string>{}(m.content);
-            return h1 ^ (h2 << 1) ^ (h3 << 2);
+        size_t operator()(const Message& m) const noexcept {
+            size_t seed = 0;
+
+            auto hashCombine = [&](size_t h) noexcept {
+                seed ^= h + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
+            };
+
+            hashCombine(std::hash<uint64_t>{}(m.origSenderId));
+            hashCombine(std::hash<uint64_t>{}(m.messageId));
+
+            std::visit(
+                [&](const auto& payload) noexcept {
+                    using T = std::decay_t<decltype(payload)>;
+
+                    if constexpr (std::is_same_v<T, uint64_t>) {
+                        hashCombine(
+                            std::hash<uint8_t>{}(
+                                static_cast<uint8_t>(MessagePayloadType::INT)
+                            )
+                        );
+                        hashCombine(std::hash<uint64_t>{}(payload));
+                    }
+                    else if constexpr (std::is_same_v<T, std::vector<uint64_t>>) {
+                        hashCombine(
+                            std::hash<uint8_t>{}(
+                                static_cast<uint8_t>(MessagePayloadType::INT_LIST)
+                            )
+                        );
+                        hashCombine(std::hash<size_t>{}(payload.size()));
+                        for (uint64_t v : payload) {
+                            hashCombine(std::hash<uint64_t>{}(v));
+                        }
+                    }
+                },
+                m.content
+            );
+
+            return seed;
         }
     };
 }
@@ -78,7 +155,8 @@ private:
     struct Packet {
         unsigned long receiverId;
         unsigned long id;
-        std::string messages;
+        std::vector<uint8_t> payload;
+        std::vector<std::pair<unsigned long, uint64_t>> messages; // For logging etc
         Clock::time_point lastSentTime = Clock::now() - std::chrono::milliseconds(100); // So that it sends the message immediately in sendMessageLoop
     };
 
@@ -97,7 +175,7 @@ private:
         }
     };
 
-    std::unordered_map<unsigned long, std::string> partialPacket_; // receiverId, partialPacket
+    std::unordered_map<unsigned long, Packet> partialPacket_; // receiverId, partialPacket
     std::unordered_map<unsigned long, Clock::time_point> lastPacketUpdateTime_; // So we can finish packet after enough time has past
 
     const unsigned long maxMessagesPerPacket_ = 8;
@@ -127,25 +205,23 @@ private:
     std::map<unsigned long, unsigned long> firstMissingPacketId_; // Outer key: senderId, Inner value: firstMissingMessage_
 
     void initReceiverBroadcaster();
-    void addMessageToPacket(const std::string& messagePayload, unsigned long receiverId) ;
+    void addMessageToPacket(const std::vector<uint8_t>& msgBytes, const Message& message, unsigned long receiverId);
     void flushMessages(unsigned long receiverId);
-    void addPacketToPending(const std::string &packetStr, unsigned long receiverId);
+    void addPacketToPending(const Packet packet, unsigned long receiverId);
     void flushPendingPacketIfReady(unsigned long receiverId);
     void flushPendingPacketsIfReady();
+    std::vector<uint8_t> serializeMessage(const Message& msg);
     void sendPacketLoop();
     bool findPacketToSend(Packet& packet);
-    void sendRaw(const std::string& payload, in_addr_t ip, unsigned short port);
+    void sendRaw(const std::vector<uint8_t>& payload, in_addr_t ip, unsigned short port);
     void receiverLoop();
-    unsigned long parsePacketPayloadId(const std::string& packetIdStr);
-    unsigned long parseMessagePayloadId(const std::string& messageIdStr);
-    bool deliverMessages(unsigned long senderId, const std::string& messages);
-    bool deliverMessage(unsigned long senderId, const std::string& messagePayload);
+    bool deliverMessages(unsigned long senderId, const uint8_t* data, size_t len) ;
     void sendAck(in_addr_t destIp, unsigned short destPort, unsigned long packetId);
     void flushAckBatch(in_addr_t destIp, unsigned short destPort);
     void handleAck(const unsigned long receiverId, const unsigned long pktId);
-    void handlePacketAck(unsigned long receiverId, Packet acknowledgedPacket);
+    void handlePacketAck(unsigned long receiverId, const Packet& acknowledgedPacket);
     void logDelivery(unsigned long senderId, unsigned long messageId);
-    void logSendPacket(const std::string& packet);
-    void logSendMessage(const std::string& messageIds);
+    void logSendPacket(const Packet& packet);
+    void logSendMessage(unsigned long senderId, unsigned long messageId);
     void printDelivered() const;
 };
