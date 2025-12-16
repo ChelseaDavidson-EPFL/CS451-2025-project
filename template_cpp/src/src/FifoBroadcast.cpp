@@ -94,7 +94,7 @@ FifoBroadcast::~FifoBroadcast() {
     stop();
 }
 
-void FifoBroadcast::broadcast(const std::string& message) {    
+void FifoBroadcast::broadcast(const MessagePayload& message) {    
     // Add this message to the pending list for this process:
     unsigned long msgId = ++msgSeqNumber_;
     logBroadcast(msgId);

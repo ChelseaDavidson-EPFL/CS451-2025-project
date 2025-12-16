@@ -17,7 +17,7 @@ public:
 
     ~FifoBroadcast();
     void stop();
-    void broadcast(const std::string& message);
+    void broadcast(const MessagePayload& message);
 
 private:
     unsigned long myProcessId_;

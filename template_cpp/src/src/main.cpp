@@ -75,8 +75,7 @@ int main(int argc, char **argv) {
   int numMessages = parser.configDetailsFifo();
 
   for (int i = 1; i <= numMessages; ++i) {
-    std::string message = std::to_string(i);
-    fb.broadcast(message);
+    fb.broadcast(i);
   }
   
   
