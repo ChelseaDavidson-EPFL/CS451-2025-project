@@ -50,8 +50,8 @@ using MessagePayload = std::variant<
 >;
 
 struct Message {
-    uint64_t origSenderId;
-    uint64_t messageId;
+    unsigned long origSenderId;
+    unsigned long messageId;
     MessagePayload content;
 
     bool operator==(const Message& other) const {

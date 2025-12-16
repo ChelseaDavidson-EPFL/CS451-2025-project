@@ -16,6 +16,7 @@
 // #define DEBUGRECEIVE
 // #define DEBUGACK
 // #define DEBUGSENDACK
+#define DEBUGCLEAN
 
 // Debug logging
 #ifdef DEBUGSEND
@@ -46,6 +47,12 @@
     #define DEBUGLOGSENDACK(msg) (std::cout << msg << std::endl)
 #else
     #define DEBUGLOGSENDACK(msg) do {} while(0) // no-op in release
+#endif
+
+#ifdef DEBUGCLEAN
+    #define DEBUGLOGCLEAN(msg) (std::cout << msg << std::endl)
+#else
+    #define DEBUGLOGCLEAN(msg) do {} while(0) // no-op in release
 #endif
 
 PerfectLink::PerfectLink(unsigned long myProcessId, in_addr_t myProcessIp, unsigned short myProcessPort, std::unordered_map<unsigned short, std::pair<unsigned long, in_addr_t>> hostMapByPort, std::unordered_map<unsigned long, std::pair<in_addr_t, unsigned short>> hostMapById, std::string logPath)
@@ -185,6 +192,7 @@ void PerfectLink::addMessageToPacket(const std::vector<uint8_t>& msgBytes, const
         if (numMessagesInPacket_[receiverId] == maxMessagesPerPacket_) {
             packetToMove = pkt;
             partialPacket_[receiverId] = {};
+            numMessagesInPacket_[receiverId] = 0;
         }
     } // partialPacketMutex_ released here
 
@@ -223,10 +231,10 @@ void PerfectLink::addPacketToPending(const Packet packet, unsigned long receiver
         std::lock_guard<std::mutex> lockPending(pendingMapMutex_);
 
         // Insert into ordered set
-        auto it = orderedPendingPackets_.insert(packet).first;
+        auto it = orderedPendingPackets_.insert(newPacket).first;
 
         // Insert the iterator into lookup map
-        pendingIndex_[{receiverId, packet.id}] = it;
+        pendingIndex_[{receiverId, newPacket.id}] = it;
     }
     // Notify send thread that work is available
     pendingCv_.notify_one();
@@ -325,10 +333,17 @@ void PerfectLink::sendPacketLoop() {
             packetToSend.payload.begin(),
             packetToSend.payload.end());
 
-        DEBUGLOGSEND("Sending packet id:" << packetToSend.id << " messages: " << packetToSend.payload);
+        DEBUGLOGSEND("Sending packet id:" << packetToSend.id << " messages: ");
+        for (auto& [senderId, msgId] : packetToSend.messages) {
+            DEBUGLOGSEND(msgId << ", ");
+        }
         
         auto [receiverIp, receiverPort] = hostMapById_[packetToSend.receiverId];
-        DEBUGLOGACK("Sending packet with payload: "<< payload << " to process " << packetToSend.receiverId);
+        DEBUGLOGACK("Sending packet with payload: ");
+        for (auto& [senderId, msgId] : packetToSend.messages) {
+            DEBUGLOGACK(msgId << ", ");
+        }
+        DEBUGLOGACK(" to process " << packetToSend.receiverId);
 
         sendRaw(payload, receiverIp, receiverPort);
     }
@@ -387,6 +402,7 @@ void PerfectLink::receiverLoop() {
     uint8_t buffer[4096];
     sockaddr_in senderAddr{};
     socklen_t senderLen = sizeof(senderAddr);
+    DEBUGLOGRECEIVE("Receiver loop start");
 
     while (running_) {
         ssize_t bytes = recvfrom(sockfd_, buffer, sizeof(buffer), 0,
@@ -412,8 +428,11 @@ void PerfectLink::receiverLoop() {
         unsigned short senderPort = ntohs(senderAddr.sin_port);
         unsigned long senderId = hostMapByPort_[senderPort].first;
 
+        DEBUGLOGRECEIVE("Processing received packet");
+
         /* ===================== ACK PACKET ===================== */
         if (packetType == static_cast<uint8_t>(PacketType::ACK)) {
+            DEBUGLOGRECEIVE("Got an ACK");
             if (bytes < static_cast<ssize_t>(sizeof(AckPacketHeader))) {
                 continue;
             }
@@ -441,6 +460,7 @@ void PerfectLink::receiverLoop() {
         if (bytes < static_cast<ssize_t>(sizeof(DataPacketHeader))) {
             continue;
         }
+        DEBUGLOGRECEIVE("Got DATA in receiver loop");
 
         auto* hdr = reinterpret_cast<const DataPacketHeader*>(buffer);
         uint64_t id = hdr->id;
@@ -518,6 +538,8 @@ void PerfectLink::receiverLoop() {
             }
         }
         DEBUGLOGRECEIVE("Delivered list at end off the receiver processing");
+        DEBUGLOGCLEAN("After receiving and delivering etc, size of delivered for this receiver ID is now: " << deliveredSet.size());
+
         printDelivered();
         DEBUGLOGRECEIVE("firstMissing at end of the receiver processing: " << firstMissingPacketId_[senderId]);
         flushAckBatch(senderAddr.sin_addr.s_addr, senderPort);
@@ -551,7 +573,7 @@ bool PerfectLink::deliverMessages(unsigned long senderId, const uint8_t* data, s
         else {
             return false; // unknown payload
         }
-
+        DEBUGLOGRECEIVE("Calling deliver callback for message with id: " << msg.messageId);
         deliverCallback_(msg, senderId);
     }
     return true;
@@ -621,6 +643,7 @@ void PerfectLink::flushAckBatch(in_addr_t destIp, unsigned short destPort) {
     }
 
     DEBUGLOGSENDACK("Flushing " << acks.size() << " ACKs");
+    DEBUGLOGCLEAN("After flushing ack, size of pendingAcks_[destPort]" << pendingAcks_[destPort].size());
 
     sendRaw(payload, destIp, destPort);
 }
@@ -651,6 +674,10 @@ void PerfectLink::handleAck(const unsigned long receiverId, const unsigned long 
     if (hasPacket && ackCallback_) {
         handlePacketAck(receiverId, acknowledgedPacket);
     }
+
+    DEBUGLOGCLEAN("After receiving ack, size of orderedPendingPackets_" << orderedPendingPackets_.size());
+    DEBUGLOGCLEAN("After receiving ack, size of pendingIndex_" << pendingIndex_.size());
+
 }
 
 
@@ -659,7 +686,7 @@ void PerfectLink::handlePacketAck(unsigned long receiverId, const Packet& acknow
 
     DEBUGLOGACK(
         "Just received ACK for packetId="
-        << acknowledgedPacket.packetId
+        << acknowledgedPacket.id
         << " from process "
         << receiverId
     );
