@@ -60,7 +60,6 @@ PerfectLink::PerfectLink(unsigned long myProcessId, in_addr_t myProcessIp, unsig
         // Sender logic - this process behaving as a sender
         packetSeqNumber_[processId] = 0;
         numMessagesInPacket_[processId] = 0;
-        msgSeqNumber_[processId] = 0;
         partialPacket_[processId] = "";
         lastPacketUpdateTime_[processId] = Clock::now();
 
@@ -71,17 +70,23 @@ PerfectLink::PerfectLink(unsigned long myProcessId, in_addr_t myProcessIp, unsig
 
     // Start listening on ports
     initReceiverBroadcaster();
-    
-    // Define delivery callback - change this for later assignments
-    deliverCallback_ = [this](unsigned long senderId, unsigned long messageId){
-        DEBUGLOG("Delivered \"" << messageId << "\" from: " << senderId);
-        logDelivery(senderId, messageId);
-    };
-
 }
 
 PerfectLink::~PerfectLink() {
     stop();
+}
+
+void PerfectLink::setDeliverCallback(std::function<void(Message, unsigned long)> cb) {
+    deliverCallback_ = cb;
+}
+
+void PerfectLink::setDeliverCallbackToDefault() {
+    // Define delivery callback - change this for later assignments
+    deliverCallback_ = [this](Message message, unsigned long senderId){
+        DEBUGLOG("Delivered \"" << message.messageId << "\" from: " << senderId);
+        logDelivery(message.origSenderId, message.messageId);
+    };
+
 }
 
 
@@ -120,11 +125,10 @@ void PerfectLink::initReceiverBroadcaster() {
     DEBUGLOG("Initialised " << myProcessId_ << " as a receiver/ broadcaster");
 }
 
-void PerfectLink::sendMessage(const std::string& message, unsigned long receiverId) {
-    DEBUGLOG("Sending message " << message);
+void PerfectLink::sendMessage(const Message& message, unsigned long receiverId) {
+    DEBUGLOG("Sending message " << message.messageId << " to process " << receiverId);
     // Add messageId to message payload
-    msgSeqNumber_[receiverId]++; // TODO - handle it not being in our list
-    std::string messagePayload = std::to_string(msgSeqNumber_[receiverId]) + ":" + message; // Final payload will be pktId|msgId:msg|mgId:msg ...
+    std::string messagePayload = std::to_string(message.origSenderId) + "-" + std::to_string(message.messageId) + ":" + message.content; // Final payload will be pktId|sendId-msgId:msg|sendId-mgId:msg ...
     addMessageToPacket(messagePayload, receiverId);
     
     // Start resend thread if not already running
@@ -463,17 +467,32 @@ bool PerfectLink::deliverMessages(unsigned long senderId, const std::string& mes
 }
 
 bool PerfectLink::deliverMessage(unsigned long senderId, const std::string& messagePayload) {
-    size_t sep = messagePayload.find(':');
+    // Getting the originalSenderId
+    size_t sep = messagePayload.find('-');
     if (sep == std::string::npos) {
         std::cerr << "Incorrect payload format of message" << std::endl;
         return false;
     }
-    std::string msgIdStr = messagePayload.substr(0, sep);
+    std::string origSenderIdStr = messagePayload.substr(0, sep);
+    unsigned long origSenderId = parseMessagePayloadId(origSenderIdStr);
+    if (origSenderId == 0) {
+        return false; // origSenderId could not be converted into a unsigned long so message could not be delivered
+    }
+    std::string remainingMsgPayload = messagePayload.substr(sep + 1);
+    size_t sep2 = remainingMsgPayload.find(':');
+    if (sep2 == std::string::npos) {
+        std::cerr << "Incorrect payload format of message" << std::endl;
+        return false;
+    }
+    std::string msgIdStr = remainingMsgPayload.substr(0, sep2);
     unsigned long msgId = parseMessagePayloadId(msgIdStr);
     if (msgId == 0) {
         return false; // MsgId could not be converted into a unsigned long so message could not be delivered
     }
-    if (deliverCallback_) deliverCallback_(senderId, msgId);
+    if (deliverCallback_) {
+        Message messageToDeliver{origSenderId, msgId, remainingMsgPayload.substr(sep2+1)};
+        deliverCallback_(messageToDeliver, senderId);
+    }
     return true;
 }
 
@@ -498,8 +517,12 @@ void PerfectLink::logDelivery(unsigned long senderId, unsigned long messageId) {
         std::cerr << "Failed to open log file: " << logPath_ << std::endl;
         return;
     }
-    logFile_ << "d " << senderId << " " << messageId << "\n";
-    if (++writeCounter_ % linesInLogBatch_ == 0) logFile_.flush(); // every 1000 lines
+    {
+        std::lock_guard<std::mutex> lock(loggingMutex_);
+        logFile_ << "d " << senderId << " " << messageId << "\n";
+        if (++writeCounter_ % linesInLogBatch_ == 0) logFile_.flush(); // every 1000 lines
+    }
+    
 }
 
 void PerfectLink::logSendPacket(const std::string& packet) { // TODO - probably don't want this anymore or need to adapt it to be for each receiverId
@@ -525,7 +548,7 @@ void PerfectLink::logSendPacket(const std::string& packet) { // TODO - probably 
     logSendMessage(messagePayload.substr(0, sep));
 }
 
-void PerfectLink::logSendMessage(const std::string& messageId) { 
+void PerfectLink::logSendMessage(const std::string& messageIds) { 
     if (!loggingToFile_) {
         return;
     }
@@ -533,8 +556,18 @@ void PerfectLink::logSendMessage(const std::string& messageId) {
         std::cerr << "Failed to open log file: " << logPath_ << std::endl;
         return;
     }
-    logFile_ << "b " << messageId << "\n";
-    if (++writeCounter_ % linesInLogBatch_ == 0) logFile_.flush(); // every 1000 lines
+    size_t sep = messageIds.find('-');
+    if (sep == std::string::npos) {
+        std::cerr << "Incorrect payload format of message, cannot send packet" << std::endl;
+        return;
+    }
+    std::string messageId = messageIds.substr(sep+1); // First value is the originalSenderId, second value is the msgId
+    
+    {
+        std::lock_guard<std::mutex> lock(loggingMutex_);
+        logFile_ << "b " << messageId << "\n";
+        if (++writeCounter_ % linesInLogBatch_ == 0) logFile_.flush(); // every 1000 lines
+    }
 }
 
 void PerfectLink::stop() {
@@ -542,8 +575,11 @@ void PerfectLink::stop() {
     if (receiverThread_.joinable()) receiverThread_.join();
     if (resendThread_.joinable()) resendThread_.join();
     if (loggingToFile_ && logFile_.is_open()) {
-        logFile_.flush();
-        logFile_.close();
+        {
+            std::lock_guard<std::mutex> lock(loggingMutex_);
+            logFile_.flush();
+            logFile_.close();
+        }
     }
     close(sockfd_);
     printDelivered();

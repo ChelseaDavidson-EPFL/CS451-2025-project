@@ -11,6 +11,37 @@
 #include <ctime>
 #include <set>
 
+struct Message {
+    unsigned long origSenderId; // Id of original sender
+    unsigned long messageId;
+    std::string content;
+
+    bool operator==(const Message& other) const {
+        return origSenderId == other.origSenderId &&
+               messageId == other.messageId &&
+               content == other.content;
+    }
+
+    bool operator<(const Message& other) const {
+        if (origSenderId == other.origSenderId)
+            return messageId < other.messageId;
+        return origSenderId < other.origSenderId;
+    }
+};
+
+// Make Message hashable so it can be used as a key in a map
+namespace std {
+    template<>
+    struct hash<Message> {
+        std::size_t operator()(const Message& m) const noexcept {
+            std::size_t h1 = std::hash<unsigned long>{}(m.origSenderId);
+            std::size_t h2 = std::hash<unsigned long>{}(m.messageId);
+            std::size_t h3 = std::hash<std::string>{}(m.content);
+            return h1 ^ (h2 << 1) ^ (h3 << 2);
+        }
+    };
+}
+
 class PerfectLink {
 public:
     PerfectLink(unsigned long myProcessId, in_addr_t myProcessIp, unsigned short myProcessPort, std::unordered_map<unsigned short, std::pair<unsigned long, in_addr_t>> hostMapByPort, std::unordered_map<unsigned long, std::pair<in_addr_t, unsigned short>> hostMapById, std::string logPath = "");
@@ -18,12 +49,14 @@ public:
     ~PerfectLink();
     void stop();
 
-    void sendMessage(const std::string& message, unsigned long receiverId);
+    void setDeliverCallback(std::function<void(Message, unsigned long)> cb);
+    void setDeliverCallbackToDefault();
+    void sendMessage(const Message& message, unsigned long receiverId);
 
 private:
-    unsigned long myProcessId_;
-    unsigned short myProcessPort_;
-    in_addr_t myProcessIp_;
+    const unsigned long myProcessId_;
+    const unsigned short myProcessPort_;
+    const in_addr_t myProcessIp_;
     std::unordered_map<unsigned short, std::pair<unsigned long, in_addr_t>> hostMapByPort_; // Port: (processId, ipAddress)
     std::unordered_map<unsigned long, std::pair<in_addr_t, unsigned short>> hostMapById_; // Id: (ip, port)
     std::string logPath_;
@@ -57,10 +90,10 @@ private:
 
     std::mutex pendingMapMutex_;
     std::mutex partialPacketMutex_;
+    std::mutex loggingMutex_;
 
     std::unordered_map<unsigned long, std::atomic<unsigned long>> packetSeqNumber_; // receiverId, seqNum
-    std::unordered_map<unsigned long, std::atomic<unsigned long>> msgSeqNumber_; // receiverId, seqNum
-    std::function<void(unsigned long, unsigned long)> deliverCallback_;
+    std::function<void(Message, unsigned long)> deliverCallback_;
     std::map<unsigned long, std::set<unsigned long>> delivered_; // Outer key: senderId, Inner pair: message sequence number (id), message content
     std::map<unsigned long, unsigned long> firstMissingPacketId_; // Outer key: senderId, Inner value: firstMissingMessage_
 
@@ -82,6 +115,6 @@ private:
     void handleAck(const unsigned long receiverId, const unsigned long pktId);
     void logDelivery(unsigned long senderId, unsigned long messageId);
     void logSendPacket(const std::string& packet);
-    void logSendMessage(const std::string& messageId);
+    void logSendMessage(const std::string& messageIds);
     void printDelivered() const;
 };
