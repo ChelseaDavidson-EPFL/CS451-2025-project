@@ -79,14 +79,11 @@ int main(int argc, char **argv) {
 
   unsigned long numMessages = configDetails.first;
 
-  for (unsigned long i = 1; i <= numMessages; ++i) {
-    for (const auto& entry : hostMapById) {
-        unsigned long processId = entry.first;
-        if (processId == parser.id()) continue;
-
-        Message message{parser.id(), i, std::to_string(i)};
-        pl.sendMessage(message, processId);
-      }
+  if(parser.id() != configDetails.second) {
+    for (unsigned long i = 1; i <= numMessages; ++i) {
+      Message message{parser.id(), i, std::to_string(i)};
+      pl.sendMessage(message, configDetails.second);
+    }
   }
   
   // After a process finishes broadcasting,
