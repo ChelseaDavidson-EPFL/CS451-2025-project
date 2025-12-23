@@ -16,7 +16,7 @@
 // #define DEBUGRECEIVE
 // #define DEBUGACK
 // #define DEBUGSENDACK
-#define DEBUGCLEAN
+// #define DEBUGCLEAN
 
 // Debug logging
 #ifdef DEBUGSEND
@@ -71,6 +71,8 @@ PerfectLink::PerfectLink(unsigned long myProcessId, in_addr_t myProcessIp, unsig
         }
         DEBUGLOG("Created log file: " << logPath_);
     }
+
+    setDeliverCallbackToDefault();
 
     // Initialse messages and packets
     for (const auto& [processId, pairVal] : hostMapById_) {
@@ -475,6 +477,7 @@ void PerfectLink::receiverLoop() {
         if (id < firstMissingPacketId) { // Already delivered it but it has been cleaned from delivered_
             sendAck(senderAddr.sin_addr.s_addr, senderPort, id); // Send ack again in case they didn't receive it
             DEBUGLOGRECEIVE("Already delivered " << id << " from " << senderId << " so skipping");
+            flushAckBatch(senderAddr.sin_addr.s_addr, senderPort);
             continue;
         }
 
@@ -493,30 +496,16 @@ void PerfectLink::receiverLoop() {
             sendAck(senderAddr.sin_addr.s_addr, senderPort, id);
 
             // Replace the firstMissingMessageId and clean deliveredSet
-            unsigned long prev = 0;
-            bool gapFound = false;
-            unsigned long lastValue = *deliveredSet.rbegin();
-            for (unsigned long msgId : deliveredSet) {
-                if (prev == 0) { // At the first value so skip
-                    prev = msgId;
-                } else { // Not at the first value
-                    if (prev + 1 != msgId) { // Found the gap
-                        DEBUGLOGRECEIVE("Found the gap so removing up to gap");
-                        deliveredSet.erase(prev);
-                        firstMissingPacketId_[senderId] = prev + 1;
-                        gapFound = true;
-                        break;
-                    } else { // Haven't found the gap but can keep cleaning
-                        deliveredSet.erase(prev);
-                        prev = msgId;
-                    }
-                }
-            }
-            if (!gapFound) {
-                // No gap found - all are in order
-                DEBUGLOGRECEIVE("Didn't find gap so removing whole list");
-                firstMissingPacketId_[senderId] = lastValue + 1;
-                deliveredSet.clear();
+            // Clean delivered packets in order
+            auto& next = firstMissingPacketId_[senderId];
+
+            while (true) {
+                auto it = deliveredSet.find(next);
+                if (it == deliveredSet.end())
+                    break;
+
+                deliveredSet.erase(it);
+                ++next;
             }
 
         } else { // Either in our delivered set or never been delivered
@@ -525,6 +514,7 @@ void PerfectLink::receiverLoop() {
             if (it != deliveredSet.end()) { // Already in our list
                 DEBUGLOGRECEIVE("Message was in delivered list");
                 sendAck(senderAddr.sin_addr.s_addr, senderPort, id); // Send ack again in case they didn't receive it
+                flushAckBatch(senderAddr.sin_addr.s_addr, senderPort);
                 continue;
             } else { // Not in our list so add and deliver it
                 DEBUGLOGRECEIVE("Message not in delivered list and wasn't one we were waiting for so we're delivering it and adding it to our list");
@@ -538,10 +528,11 @@ void PerfectLink::receiverLoop() {
             }
         }
         DEBUGLOGRECEIVE("Delivered list at end off the receiver processing");
-        DEBUGLOGCLEAN("After receiving and delivering etc, size of delivered for this receiver ID is now: " << deliveredSet.size());
 
         printDelivered();
-        DEBUGLOGRECEIVE("firstMissing at end of the receiver processing: " << firstMissingPacketId_[senderId]);
+        DEBUGLOGCLEAN("firstMissing at end of the receiver processing: " << firstMissingPacketId_[senderId]);
+        DEBUGLOGCLEAN("After receiving and delivering etc, size of delivered for sender ID " << senderId << " is now: " << deliveredSet.size());
+
         flushAckBatch(senderAddr.sin_addr.s_addr, senderPort);
     }
 }
