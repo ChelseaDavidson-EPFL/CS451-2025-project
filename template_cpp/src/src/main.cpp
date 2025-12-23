@@ -71,18 +71,17 @@ int main(int argc, char **argv) {
 
   in_addr_t processIp = hostMapById[parser.id()].first;
   unsigned short processPort = hostMapById[parser.id()].second;
-  PerfectLink pl = PerfectLink(parser.id(), processIp, processPort, hostMapByPort, hostMapById, parser.outputPath());
-  pl.setDeliverCallbackToDefault();
+  PerfectLink pl = PerfectLink(parser.id(), processIp, processPort, configDetails.second, receiverIp, receiverPort, hostMapByPort, parser.outputPath());
   g_pl = &pl; // Have global reference to perfect link so that you can call stop() when terminate signals are called
 
   std::cout << "Broadcasting and delivering messages...\n\n";
 
   int numMessages = configDetails.first;
-  unsigned long msgId = 0;
+
   if(parser.id() != configDetails.second) {
     for (int i = 1; i <= numMessages; ++i) {
-      Message message{parser.id(), ++msgId, i};
-      pl.sendMessage(message, configDetails.second);
+      std::string message = std::to_string(i);
+      pl.sendMessage(message);
     }
   }
   
