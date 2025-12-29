@@ -2,6 +2,7 @@
 #include <unistd.h>
 #include <fstream>
 #include <sys/stat.h>  // for mkdir
+#include <cassert>
 #include <string>
 #include <cerrno>
 #include <cstring>
@@ -60,7 +61,7 @@ PerfectLink::PerfectLink(unsigned long myProcessId, in_addr_t myProcessIp, unsig
         // Sender logic - this process behaving as a sender
         packetSeqNumber_[processId] = 0;
         numMessagesInPacket_[processId] = 0;
-        partialPacket_[processId] = "";
+        partialPacket_[processId] = {};
         lastPacketUpdateTime_[processId] = Clock::now();
 
         // Receiver logic - this process behaving as a receiver
@@ -76,7 +77,7 @@ PerfectLink::~PerfectLink() {
     stop();
 }
 
-void PerfectLink::setDeliverCallback(std::function<void(Message, unsigned long)> cb) {
+void PerfectLink::setDeliverCallback(std::function<void(const Message&, unsigned long)> cb) {
     deliverCallback_ = cb;
 }
 
@@ -125,83 +126,85 @@ void PerfectLink::initReceiverBroadcaster() {
     DEBUGLOG("Initialised " << myProcessId_ << " as a receiver/ broadcaster");
 }
 
-void PerfectLink::sendMessage(const Message& message, unsigned long receiverId) {
-    DEBUGLOG("Sending message " << message.messageId << " to process " << receiverId);
-    // Add messageId to message payload
-    std::string messagePayload = std::to_string(message.origSenderId) + "-" + std::to_string(message.messageId) + ":" + message.content; // Final payload will be pktId|sendId-msgId:msg|sendId-mgId:msg ...
-    addMessageToPacket(messagePayload, receiverId);
-    
-    // Start resend thread if not already running
+std::vector<unsigned char> PerfectLink::toBytes(unsigned long value) {
+    std::vector<unsigned char> bytes(sizeof(unsigned long));
+
+    for (size_t i = 0; i < sizeof(unsigned long); ++i) {
+        bytes[sizeof(unsigned long) - 1 - i] =
+            static_cast<unsigned char>((value >> (i * 8)) & 0xFF);
+    }
+
+    return bytes;
+}
+
+void PerfectLink::sendMessage(const Message& msg, unsigned long receiverId) {
+    addMessageToPacket(msg, receiverId);
     if (!resendThread_.joinable()) {
         resendThread_ = std::thread(&PerfectLink::sendPacketLoop, this);
-        DEBUGLOGSEND("Starting sending thread");
     }
 }
 
-void PerfectLink::addMessageToPacket(const std::string& messagePayload, unsigned long receiverId) { // Adding message to current packet being built
-    DEBUGLOGSEND("Adding message payload: " << messagePayload << " to partial packet");
-    std::string packetToMove;
+void PerfectLink::addMessageToPacket(const Message& msg, unsigned long receiverId) {
+    std::vector<Message> packetToFlush;
 
-    // Hold partialPacketMutex 
-   {
+    {
         std::lock_guard<std::mutex> lock(partialPacketMutex_);
-        // TODO - get direct reference to the partialPacket_ at this processId
 
-        // Check if it's the first message
-        if (partialPacket_[receiverId].empty()) {
-            partialPacket_[receiverId] = messagePayload;
-        } else {
-            partialPacket_[receiverId] += "|" + messagePayload;
-        }
-        lastPacketUpdateTime_[receiverId] = Clock::now();
+        partialPacket_[receiverId].push_back(msg);
         numMessagesInPacket_[receiverId]++;
+        lastPacketUpdateTime_[receiverId] = Clock::now();
 
-        DEBUGLOGSEND("Num messages in partial packet is now: " << numMessagesInPacket_[receiverId]);
-
-        // Check if we now have to send the packet
-        if (numMessagesInPacket_[receiverId] == maxMessagesPerPacket_) {
-            DEBUGLOGSEND("Just added the message and partial packet now big enough so flushing");
-            packetToMove = partialPacket_[receiverId];
-            partialPacket_[receiverId] = "";
+        // Flush if packet full
+        if (numMessagesInPacket_[receiverId] >= maxMessagesPerPacket_) {
+            packetToFlush = partialPacket_[receiverId];
+            partialPacket_[receiverId] = {};
+            numMessagesInPacket_[receiverId] = 0;
         }
-    } // partialPacketMutex_ released here
+    }
 
-    // If we copied a packet out, add it to pending now without holding partialPacketMutex_
-    if (!packetToMove.empty()) {
-        addPacketToPending(packetToMove, receiverId);
+    // Serialize & enqueue outside the lock
+    if (!packetToFlush.empty()) {
+        auto payload =
+            serializePacket(packetSeqNumber_[receiverId], packetToFlush);
+
+        addPacketToPending(payload, receiverId);
     }
 }
 
-void PerfectLink::flushMessages(unsigned long receiverId) {
-    DEBUGLOGSEND("Flushing messages");
-    std::string packetToMove;
-    { // Hold partialPacketMutex_ lock
+
+void PerfectLink::flushMessages(unsigned long receiverId)
+{
+    std::vector<Message> packetToFlush;
+
+    {
         std::lock_guard<std::mutex> lock(partialPacketMutex_);
         if (!partialPacket_[receiverId].empty()) {
-            packetToMove = partialPacket_[receiverId];
+            packetToFlush = std::move(partialPacket_[receiverId]);
             partialPacket_[receiverId].clear();
-        } else {
-            DEBUGLOGSEND("Partial packet was empty so didn't do anything");
+            numMessagesInPacket_[receiverId] = 0;
         }
-    } // partialPacketMutex_ released here
+    }
 
-    if (!packetToMove.empty()) {
-        addPacketToPending(packetToMove, receiverId);
+    if (!packetToFlush.empty()) {
+        auto payload =
+            serializePacket(packetSeqNumber_[receiverId], packetToFlush);
+
+        addPacketToPending(payload, receiverId);
     }
 }
 
-void PerfectLink::addPacketToPending(const std::string &packetStr, unsigned long receiverId) {
-    if (packetStr.empty()) return;
-    
-    packetSeqNumber_[receiverId]++;
-    Packet packet = Packet({receiverId, packetSeqNumber_[receiverId], packetStr});
-    logSendPacket(packetStr);
-    numMessagesInPacket_[receiverId] = 0;
-    
-    // lock pending map and assign packet id under that lock
+
+void PerfectLink::addPacketToPending(const std::vector<uint8_t>& payload, unsigned long receiverId) {
+    if (payload.empty()) return;
+
+    packetSeqNumber_[receiverId]++;   // ONLY HERE
+
+    Packet packet{receiverId, packetSeqNumber_[receiverId], payload};
+    logSendPacket(payload);
+
+ // lock pending map and assign packet id under that lock
     std::lock_guard<std::mutex> lockPending(pendingMapMutex_);
     pending_[receiverId][packet.id] = packet;
-    DEBUGLOGSEND("Added packet id=" << packet.id << " to pending for receiverId: " << receiverId << ". pending_ size for this receiver id is =" << pending_[receiverId].size());
 }
 
 void PerfectLink::flushPendingPacketIfReady(unsigned long receiverId) {
@@ -231,18 +234,20 @@ void PerfectLink::flushPendingPacketsIfReady() {
 
 void PerfectLink::sendPacketLoop() {
     while (running_) {
+        // Flush partial packets if needed
         flushPendingPacketsIfReady();
+
         Packet packetToSend;
-        if (!findPacketToSend(packetToSend)) { // Updating packetToSend with the packet that is ready to be sent // TODO - reuse this logic when parsing ID
-            DEBUGLOGSEND("Packets were sent too recently or pending_ was empty - waiting 10ms");
+        if (!findPacketToSend(packetToSend)) {
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
             continue;
         }
 
-        std::string payload = std::to_string(packetToSend.id) + "|" + packetToSend.messages;
-        DEBUGLOGSEND("Sending packet id:" << packetToSend.id << " messages: " << packetToSend.messages);
+        // Lookup destination
         auto [receiverIp, receiverPort] = hostMapById_[packetToSend.receiverId];
-        sendRaw(payload, receiverIp, receiverPort);
+
+        // Send raw binary payload
+        sendRaw(packetToSend.payload, receiverIp, receiverPort);
     }
 }
 
@@ -272,27 +277,28 @@ bool PerfectLink::findPacketToSend(Packet& outPacket) { // Finds a packet in pen
     return false; // nothing ready to be sent again
 }
 
-void PerfectLink::sendRaw(const std::string& payload, in_addr_t ip, unsigned short port){
+void PerfectLink::sendRaw(const std::vector<uint8_t>& data, in_addr_t ip, unsigned short port) {
     sockaddr_in dest{};
     dest.sin_family = AF_INET;
     dest.sin_port = htons(port);
     dest.sin_addr.s_addr = ip;
 
-    sendto(sockfd_, payload.c_str(), payload.size(), 0,
-           reinterpret_cast<sockaddr*>(&dest), sizeof(dest));
+    sendto(sockfd_,
+           data.data(),
+           data.size(),
+           0,
+           reinterpret_cast<sockaddr*>(&dest),
+           sizeof(dest));
 }
 
 void PerfectLink::receiverLoop() {
-    char buffer[1024];
+    uint8_t buffer[2048];
     sockaddr_in senderAddr{};
     socklen_t senderLen = sizeof(senderAddr);
 
     while (running_) {
-        // DEBUGLOG("listening...");
-
-        ssize_t bytes = recvfrom(sockfd_, buffer, sizeof(buffer)-1, 0,
-                    reinterpret_cast<sockaddr*>(&senderAddr), &senderLen);
-
+        ssize_t bytes = recvfrom(sockfd_, buffer, sizeof(buffer), 0,
+                     reinterpret_cast<sockaddr*>(&senderAddr), &senderLen);
         if (bytes < 0) {
             // handle non-fatal errors (timeout / interrupt) by continuing the loop
             if (errno == EAGAIN || errno == EINTR) {
@@ -310,194 +316,124 @@ void PerfectLink::receiverLoop() {
             continue;
         }
 
-        buffer[bytes] = '\0';
-        std::string payload(buffer);
+        const uint8_t* p = buffer;
+        uint8_t type = *p++;
 
         unsigned short senderPort = ntohs(senderAddr.sin_port);
         unsigned long senderId = hostMapByPort_[senderPort].first;
 
-        // Extract message type
-        if (payload.rfind("ACK:", 0) == 0) {
-            std::string pktIdStr = payload.substr(4);
-            unsigned long pktId = parsePacketPayloadId(pktIdStr);
-            if (pktId == 0) { // TODO - add more meaningful error
-                continue;
+        if (type == 1) { // ACK
+            uint64_t pktId = read_u64(p);
+            handleAck(senderId, pktId);
+        } else { // DATA
+            uint64_t packetId = read_u64(p);
+
+            if (deserializeAndDeliver(senderId, packetId, p, bytes - 1 - sizeof(uint64_t))) {
+                sendAck(senderAddr.sin_addr.s_addr, senderPort, packetId);
             }
-            handleAck(senderId, pktId); // "senderId" in this case is the process we SENT a message to and has now acknowledged, so they are technically the receiverId
-            continue;
+        }
+    }
+}
+
+bool PerfectLink::deserializeAndDeliver(unsigned long senderId,
+                                        uint64_t packetId,
+                                        const uint8_t* data,
+                                        size_t /*len*/)
+{
+    const uint8_t* p = data;
+
+    uint32_t count = read_u32(p);
+
+    unsigned long firstMissing = firstMissingPacketId_[senderId];
+    auto& deliveredSet = delivered_[senderId];
+
+    // ---- CASE 1: already cleaned ----
+    if (packetId < firstMissing) {
+        return true; // ACK again, do NOT deliver
+    }
+
+    // ---- CASE 2: exactly the one we're waiting for ----
+    if (packetId == firstMissing) {
+        // Deliver messages
+        for (uint32_t i = 0; i < count; ++i) {
+            Message m;
+            m.origSenderId = read_u64(p);
+            m.messageId    = read_u64(p);
+            uint32_t sz    = read_u32(p);
+            m.content.assign(p, p + sz);
+            p += sz;
+
+            if (deliverCallback_) {
+                deliverCallback_(m, senderId);
+            }
         }
 
-        // Parse as normal message
-        size_t sep = payload.find('|');
-        if (sep == std::string::npos) {
-            std::cerr << "Incorrect payload format" << std::endl;
-            continue;
-        }
+        deliveredSet.insert(packetId);
 
-        // Get message info
-        std::string idStr = payload.substr(0, sep);
-        unsigned long id = parsePacketPayloadId(idStr);
-        if (id == 0) { // TODO - Add more meaningful error
-            continue;
-        }
-        std::string messages = payload.substr(sep + 1);
-        unsigned long firstMissingPacketId = firstMissingPacketId_[senderId];
-        DEBUGLOGRECEIVE("Just received (ProcessID, idStr): " << senderId << ", " << id);
-
-        DEBUGLOGRECEIVE("Delivered at start of receive process");
-        printDelivered();
-        DEBUGLOGRECEIVE("First missing packet at start is: " << firstMissingPacketId);
-        // Check if already delivered:
-        if (id < firstMissingPacketId) { // Already delivered it but it has been cleaned from delivered_
-            sendAck(senderAddr.sin_addr.s_addr, senderPort, id); // Send ack again in case they didn't receive it
-            DEBUGLOGRECEIVE("Already delivered " << id << " from " << senderId << " so skipping");
-            continue;
-        }
-        
-        // Find delivered list for this processId
-        auto& deliveredSet = delivered_[senderId]; // TODO - do I need a mutex lock here?
-    
-
-        if (id == firstMissingPacketId) { // The one we've been waiting for so deliver it
-            DEBUGLOGRECEIVE("Just received firstMissingMessageId so attempting to deliver and clean delivered");
-            if (!deliverMessages(senderId, messages)) { // Couldn't deliver one or more of the messages, so don't acknowledge
-                DEBUGLOGRECEIVE("Failed to deliver one or more of the messages so skipping this packet");
-                std::cerr << "Failed to deliver one or more of the messages so skipping packet with id: " << id << std::endl;
-                continue;
-            } 
-            deliveredSet.insert(id);
-            sendAck(senderAddr.sin_addr.s_addr, senderPort, id);
-
-            // Now replace the firstMissingMessageId and clean deliveredSet
-            unsigned long prev = 0;
-            bool gapFound = false;
-            unsigned long lastValue = *deliveredSet.rbegin();
-            for (unsigned long msgId : deliveredSet) {
-                if (prev == 0) { // At the first value so skip
-                    prev = msgId;
-                } else { // Not at the first value
-                    if (prev + 1 != msgId) { // Found the gap
-                        DEBUGLOGRECEIVE("Found the gap so removing up to gap");
-                        deliveredSet.erase(prev);
-                        firstMissingPacketId_[senderId] = prev + 1;
-                        gapFound = true;
-                        break;
-                    } else { // Haven't found the gap but can keep cleaning
-                        deliveredSet.erase(prev);
-                        prev = msgId;
-                    }
+        // ---- CLEAN deliveredSet (safe + linear) ----
+        // Now replace the firstMissingMessageId and clean deliveredSet
+        unsigned long prev = 0;
+        bool gapFound = false;
+        unsigned long lastValue = *deliveredSet.rbegin();
+        for (unsigned long pktId : deliveredSet) {
+            if (prev == 0) { // At the first value so skip
+                prev = pktId;
+            } else { // Not at the first value
+                if (prev + 1 != pktId) { // Found the gap
+                    DEBUGLOGRECEIVE("Found the gap so removing up to gap");
+                    deliveredSet.erase(prev);
+                    firstMissingPacketId_[senderId] = prev + 1;
+                    gapFound = true;
+                    break;
+                } else { // Haven't found the gap but can keep cleaning
+                    deliveredSet.erase(prev);
+                    prev = pktId;
                 }
             }
-            if (!gapFound) {
-                // No gap found: all are in order
-                DEBUGLOGRECEIVE("Didn't find gap so removing whole list");
-                firstMissingPacketId_[senderId] = lastValue + 1;
-                deliveredSet.clear();
-            }
-
-        } else { // Either in our delivered set or never been delivered
-            auto it = deliveredSet.find(id);
-
-            if (it != deliveredSet.end()) { // Already in our list
-                DEBUGLOGRECEIVE("Message was in delivered list");
-                sendAck(senderAddr.sin_addr.s_addr, senderPort, id); // Send ack again in case they didn't receive it
-                continue;
-            } else { // Not in our list so add and deliver it
-                DEBUGLOGRECEIVE("Message not in delivered list and wasn't one we were waiting for so we're delivering it and adding it to our list");
-                if (!deliverMessages(senderId, messages)) { // Couldn't deliver one or more of the messages, so don't acknowledge
-                    DEBUGLOGRECEIVE("Failed to deliver one or more of the messages so skipping this packet");
-                    std::cerr << "Failed to deliver one or more of the messages so skipping packet with id: " << id << std::endl;
-                    continue;
-                } 
-                deliveredSet.insert(id);
-                sendAck(senderAddr.sin_addr.s_addr, senderPort, id);
-            }
         }
-        DEBUGLOGRECEIVE("Delivered list at end off the receiver processing");
-        printDelivered();
-        DEBUGLOGRECEIVE("firstMissing at end of the receiver processing: " << firstMissingPacketId_[senderId]);
-    }
-}
-
-unsigned long PerfectLink::parsePacketPayloadId(const std::string& packetIdStr) {
-    try {
-        unsigned long pktId = std::stoul(packetIdStr);
-        return pktId;
-    } catch (std::invalid_argument&){
-        std::cerr << "Id in packet payload was not a number" << std::endl;
-        return 0;
-    } catch (std::out_of_range&) {
-        std::cerr << "Id in packet payload was out of range" << std::endl;
-        return 0;
-    }
-    return 0;
-}
-
-unsigned long PerfectLink::parseMessagePayloadId(const std::string& messageIdStr) {
-    try {
-        unsigned long msgId = std::stoul(messageIdStr);
-        return msgId;
-    } catch (std::invalid_argument&){
-        std::cerr << "Id in message payload was not a number" << std::endl;
-        return 0;
-    } catch (std::out_of_range&) {
-        std::cerr << "Id in message payload was out of range" << std::endl;
-        return 0;
-    }
-    return 0;
-}
-
-bool PerfectLink::deliverMessages(unsigned long senderId, const std::string& messages) { // returns true if it was able to deliver and false otherwise
-    size_t start = 0;
-    size_t end;
-
-    DEBUGLOGRECEIVE("Delivering packet:\n" << messages);
-
-    while ((end = messages.find('|', start)) != std::string::npos) {
-        if (!deliverMessage(senderId, messages.substr(start, end - start))) {
-            return false; // Something failed delivering this message so fail the whole packet
+        if (!gapFound) {
+            // No gap found: all are in order
+            DEBUGLOGRECEIVE("Didn't find gap so removing whole list");
+            firstMissingPacketId_[senderId] = lastValue + 1;
+            deliveredSet.clear();
         }
-        start = end + 1;
+        return true; // sends the ack
     }
-    // Last token after the last delimiter
-    if (!deliverMessage(senderId, messages.substr(start))) {
-        return false; // Something failed delivering this message so fail the whole packet
-    }
-    return true; // All messages successfully delivered
-}
 
-bool PerfectLink::deliverMessage(unsigned long senderId, const std::string& messagePayload) {
-    // Getting the originalSenderId
-    size_t sep = messagePayload.find('-');
-    if (sep == std::string::npos) {
-        std::cerr << "Incorrect payload format of message" << std::endl;
-        return false;
+    // ---- CASE 3: packetId > firstMissing ----
+    // Check if already delivered
+    auto it = deliveredSet.find(packetId);
+
+    if (it != deliveredSet.end()) { // Already in our list
+        return true;
+    } 
+    // Not in our list so add and deliver it
+    // Deliver messages
+    for (uint32_t i = 0; i < count; ++i) {
+        Message m;
+        m.origSenderId = read_u64(p);
+        m.messageId    = read_u64(p);
+        uint32_t sz    = read_u32(p);
+        m.content.assign(p, p + sz);
+        p += sz;
+
+        if (deliverCallback_) {
+            deliverCallback_(m, senderId);
+        }
     }
-    std::string origSenderIdStr = messagePayload.substr(0, sep);
-    unsigned long origSenderId = parseMessagePayloadId(origSenderIdStr);
-    if (origSenderId == 0) {
-        return false; // origSenderId could not be converted into a unsigned long so message could not be delivered
-    }
-    std::string remainingMsgPayload = messagePayload.substr(sep + 1);
-    size_t sep2 = remainingMsgPayload.find(':');
-    if (sep2 == std::string::npos) {
-        std::cerr << "Incorrect payload format of message" << std::endl;
-        return false;
-    }
-    std::string msgIdStr = remainingMsgPayload.substr(0, sep2);
-    unsigned long msgId = parseMessagePayloadId(msgIdStr);
-    if (msgId == 0) {
-        return false; // MsgId could not be converted into a unsigned long so message could not be delivered
-    }
-    if (deliverCallback_) {
-        Message messageToDeliver{origSenderId, msgId, remainingMsgPayload.substr(sep2+1)};
-        deliverCallback_(messageToDeliver, senderId);
-    }
+    deliveredSet.insert(packetId);
     return true;
 }
 
-void PerfectLink::sendAck(in_addr_t destIp, unsigned short destPort, unsigned long packetId) {
-    std::string ack = "ACK:" + std::to_string(packetId);
+
+
+void PerfectLink::sendAck(in_addr_t destIp, unsigned short destPort, uint64_t packetId) {
+    std::vector<uint8_t> ack;
+    ack.reserve(1 + sizeof(uint64_t));
+
+    ack.push_back(1);              // ACK type
+    write_u64(ack, packetId);      // Packet ID
+
     sendRaw(ack, destIp, destPort);
 }
 
@@ -525,49 +461,72 @@ void PerfectLink::logDelivery(unsigned long senderId, unsigned long messageId) {
     
 }
 
-void PerfectLink::logSendPacket(const std::string& packet) { // TODO - probably don't want this anymore or need to adapt it to be for each receiverId
-    size_t start = 0;
-    size_t end;
-    while ((end = packet.find('|', start)) != std::string::npos) {
-        std::string messagePayload = packet.substr(start, end - start);
-        size_t sep = messagePayload.find(':');
-        if (sep == std::string::npos) {
-            std::cerr << "Incorrect payload format of message, cannot send packet" << std::endl;
-            return;
-        }
-        logSendMessage(messagePayload.substr(0, sep));
-        start = end + 1;
-    }
-    // Last token after the last delimiter
-    std::string messagePayload = packet.substr(start);
-    size_t sep = messagePayload.find(':');
-    if (sep == std::string::npos) {
-        std::cerr << "Incorrect payload format of message, cannot send packet" << std::endl;
+void PerfectLink::logSendPacket(const std::vector<uint8_t>& payload)
+{
+    if (!loggingToFile_ || !logFile_.is_open()) {
         return;
     }
-    logSendMessage(messagePayload.substr(0, sep));
+
+    const uint8_t* p   = payload.data();
+    const uint8_t* end = payload.data() + payload.size();
+
+    // ---- Packet type ----
+    if (p + 1 > end) return;
+    uint8_t type = *p++;
+    if (type != 0) return; // DATA packets only
+
+    // ---- packetId ----
+    if (p + sizeof(uint64_t) > end) return;
+    read_u64(p);
+
+    // ---- message count ----
+    if (p + sizeof(uint32_t) > end) return;
+    uint32_t numMessages = read_u32(p);
+
+    for (uint32_t i = 0; i < numMessages; ++i) {
+        // ---- origSenderId ----
+        if (p + sizeof(uint64_t) > end) return;
+        read_u64(p);
+
+        // ---- messageId ----
+        if (p + sizeof(uint64_t) > end) return;
+        uint64_t messageId = read_u64(p);
+
+        // ---- content ----
+        if (p + sizeof(uint32_t) > end) return;
+        uint32_t contentSize = read_u32(p);
+
+        if (p + contentSize > end) return;
+        p += contentSize;
+
+        // ---- LOG ----
+        {
+            std::lock_guard<std::mutex> lock(loggingMutex_);
+            logFile_ << "b " << messageId << "\n";
+            if (++writeCounter_ % linesInLogBatch_ == 0) {
+                logFile_.flush();
+            }
+        }
+    }
 }
 
-void PerfectLink::logSendMessage(const std::string& messageIds) { 
-    if (!loggingToFile_) {
-        return;
+
+std::vector<uint8_t>
+PerfectLink::serializePacket(unsigned long packetId, const std::vector<Message>& msgs) {
+    std::vector<uint8_t> b;
+    b.push_back(0); // DATA type
+    write_u64(b, packetId);
+    assert(msgs.size() <= std::numeric_limits<uint32_t>::max());
+    write_u32(b, static_cast<uint32_t>(msgs.size()));
+
+    for (auto& m : msgs) {
+        write_u64(b, m.origSenderId);
+        write_u64(b, m.messageId);
+        assert(m.content.size() <= std::numeric_limits<uint32_t>::max());
+        write_u32(b, static_cast<uint32_t>(m.content.size()));
+        b.insert(b.end(), m.content.begin(), m.content.end());
     }
-    if (!logFile_.is_open()) {
-        std::cerr << "Failed to open log file: " << logPath_ << std::endl;
-        return;
-    }
-    size_t sep = messageIds.find('-');
-    if (sep == std::string::npos) {
-        std::cerr << "Incorrect payload format of message, cannot send packet" << std::endl;
-        return;
-    }
-    std::string messageId = messageIds.substr(sep+1); // First value is the originalSenderId, second value is the msgId
-    
-    {
-        std::lock_guard<std::mutex> lock(loggingMutex_);
-        logFile_ << "b " << messageId << "\n";
-        if (++writeCounter_ % linesInLogBatch_ == 0) logFile_.flush(); // every 1000 lines
-    }
+    return b;
 }
 
 void PerfectLink::stop() {
