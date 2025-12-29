@@ -52,6 +52,9 @@ LatticeAgreement::~LatticeAgreement() {
 }
 
 void LatticeAgreement::propose(std::set<unsigned long> proposal) {
+    // Reset acceptor state for new instance:
+    acceptedValue_ = {};
+
     proposedValue_ = proposal;
     active_ = true;
     activeProposalNumber_++;
@@ -151,10 +154,11 @@ void LatticeAgreement::broadcastProposal(Proposal proposal) {
     for (const auto& entry : hostMapById_) {
         unsigned long processId = entry.first;
 
-        if (processId == myProcessId_) continue; // Skip itself - TODO - idk if this is correct
-
         sendProposalMsg(proposal, processId);
     }
+
+    // Acknowledge your own proposal:
+    ackCount_++;
 }
 
 void LatticeAgreement::tryDecide(){
