@@ -81,7 +81,7 @@ int main(int argc, char **argv) {
 
   if(parser.id() != configDetails.second) {
     for (unsigned long i = 1; i <= numMessages; ++i) {
-      Message message{parser.id(), i, pl.toBytes(i)};
+      Message message{parser.id(), i, std::to_string(i)};
       pl.sendMessage(message, configDetails.second);
     }
   }
