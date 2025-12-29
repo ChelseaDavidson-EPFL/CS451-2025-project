@@ -185,6 +185,47 @@ public:
     return result;
   }
 
+  bool configDetailsLattice(unsigned long& p, unsigned long& vs, unsigned long& ds) {
+    std::ifstream infile(configPath());
+    if (!infile.is_open()) {
+        std::cerr << "Failed to open file\n";
+        return false;
+    }
+
+    infile >> p >> vs >> ds;
+    infile.close();
+    return true;  
+  }
+
+  std::set<unsigned long> getProposal(unsigned long n) {
+    std::ifstream infile(configPath());
+    std::set<unsigned long> proposal;
+
+    if (!infile.is_open()) {
+        std::cerr << "Failed to open file: " << configPath() << "\n";
+        return proposal;
+    }
+
+    std::string line;
+    std::getline(infile, line); // skip header
+
+    // Go to line n
+    for (unsigned long i = 1; i <= n; ++i) {
+        if (!std::getline(infile, line)) {
+            std::cerr << "Proposal line " << n << " not found\n";
+            return proposal;
+        }
+    }
+
+    std::istringstream iss(line);
+    unsigned long num;
+    while (iss >> num) {
+        proposal.insert(num);
+    }
+
+    return proposal;
+  }
+
   std::vector<Host> hosts() {
     std::ifstream hostsFile(hostsPath());
     std::vector<Host> hosts;

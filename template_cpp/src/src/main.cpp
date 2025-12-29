@@ -2,12 +2,16 @@
 #include <iostream>
 #include <thread>
 #include <signal.h>
+#include <set>
 
 #include "parser.hpp"
 #include "hello.h"
 #include "PerfectLink.hpp"
+#include "LatticeAgreement.hpp"
+
 
 PerfectLink* g_pl = nullptr;
+LatticeAgreement* g_la = nullptr;
 
 
 static void stop(int) {
@@ -25,6 +29,10 @@ static void stop(int) {
   if (g_pl) {
     std::cout << "Stopping PerfectLink and flushing logs...\n";
     g_pl->stop();
+  }
+  if (g_la) {
+    std::cout << "Stopping PerfectLink and flushing logs...\n";
+    g_la->stop();
   }
 
   // exit directly from signal handler
@@ -44,8 +52,11 @@ int main(int argc, char **argv) {
 
   hello();
 
-  auto configDetails = parser.configDetailsPerfect();
-  unsigned long receiverId = configDetails.second;
+  // Get lattice config details
+  unsigned long numProposals, maxElementsInProposal, maxDistinctElements;
+  if(!parser.configDetailsLattice(numProposals, maxElementsInProposal, maxDistinctElements)) {
+    std::cerr << "Could not parse lattice agreement config" << std::endl;
+  }
   std::cout << "My ID: " << parser.id() << "\n\n";
 
   // Get host details
@@ -57,9 +68,6 @@ int main(int argc, char **argv) {
     hostMapById[host.id] = {host.ip, host.port};
     hostMapByPort[host.port] = {host.id, host.ip};
   }
-
-  in_addr_t receiverIp = hostMapById[receiverId].first;
-  unsigned short receiverPort = hostMapById[receiverId].second;
 
   bool idInHosts = hostMapById.count(parser.id()) > 0;
   
@@ -75,16 +83,13 @@ int main(int argc, char **argv) {
   pl.setDeliverCallbackToDefault();
   g_pl = &pl; // Have global reference to perfect link so that you can call stop() when terminate signals are called
 
-  std::cout << "Broadcasting and delivering messages...\n\n";
+  for (unsigned long n = 1; n <= numProposals; ++n) {
+    std::set<unsigned long> prop = parser.getProposal(n);
 
-  unsigned long numMessages = configDetails.first;
-
-  if(parser.id() != configDetails.second) {
-    for (unsigned long i = 1; i <= numMessages; ++i) {
-      Message message{parser.id(), i, std::to_string(i)};
-      pl.sendMessage(message, configDetails.second);
-    }
+    for (auto num : prop) std::cout << num << " ";
+    std::cout << std::endl;
   }
+
   
   // After a process finishes broadcasting,
   // it waits forever for the delivery of messages.
