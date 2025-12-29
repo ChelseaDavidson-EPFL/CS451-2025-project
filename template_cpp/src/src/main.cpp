@@ -85,8 +85,10 @@ int main(int argc, char **argv) {
   for (unsigned long n = 1; n <= numProposals; ++n) {
     std::set<unsigned long> prop = parser.getProposal(n);
 
-    // for (auto num : prop) std::cout << num << " ";
-    // std::cout << std::endl;
+    la.propose(prop);
+
+    // block until decide() is called
+    la.waitForDecision();
   }
 
   

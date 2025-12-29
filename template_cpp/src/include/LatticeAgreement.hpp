@@ -10,6 +10,8 @@
 #include <map>
 #include <list>
 #include <ctime>
+#include <condition_variable>
+
 
 #include "PerfectLink.hpp"
 
@@ -33,6 +35,9 @@ public:
 
     void propose(std::set<unsigned long> proposal);
 
+    // Application-layer wait
+    void waitForDecision();
+
     void stop();
 
 private:
@@ -50,6 +55,11 @@ private:
 
     // Message vars
     unsigned long msgSeqNumber_;
+
+    // Application level vars
+    std::mutex decisionMutex_;
+    std::condition_variable decisionCv_;
+    bool decisionReady_ = false;
     
     // Logging vars
     size_t writeCounter_ = 0; // To log in batches
@@ -75,9 +85,10 @@ private:
     void handleProposal(Proposal proposal, unsigned long senderId);
     void handleAck(unsigned long proposalNumber);
     void handleNack(Nack nack);
-    void triggerNewProposal();
+    void checkIfNeedNewProposal();
     void tryDecide();
     void decide(std::set<unsigned long> proposedValue);
+    void logDecision(std::set<unsigned long> proposedValue);
     void sendAckMsg(unsigned long proposalNumber, unsigned long receiverId);
     void sendNackMsg(Nack nack, unsigned long receiverId);
     void sendProposalMsg(Proposal proposal, unsigned long receiverId);

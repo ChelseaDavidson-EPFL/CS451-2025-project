@@ -64,6 +64,42 @@ void LatticeAgreement::propose(std::set<unsigned long> proposal) {
     broadcastProposal(prop);
 }
 
+void LatticeAgreement::receivedMessage(const Message& message, const unsigned long& senderId) {
+    const std::string& content = message.content;
+
+    std::string type = content.substr(0, 3);
+
+    if (type == "PRP") {
+        Proposal proposal;
+        proposal.proposalNumber = parseNumberInParens(content);
+
+        size_t valuesStart = content.find(')') + 1;
+        proposal.proposedValue = parseValueSet(content, valuesStart);
+
+        handleProposal(proposal, senderId);
+    }
+    else if (type == "NAC") {
+        Nack nack;
+        nack.proposalNumber = parseNumberInParens(content);
+
+        size_t valuesStart = content.find(')') + 1;
+        nack.proposedValue = parseValueSet(content, valuesStart);
+
+        handleNack(nack);
+    }
+    else if (type == "ACK") {
+        unsigned long proposalNumber = parseNumberInParens(content);
+
+        handleAck(proposalNumber);
+    }
+    else {
+        throw std::runtime_error("Unknown message type: " + type);
+    }
+
+    tryDecide();
+    checkIfNeedNewProposal();
+}
+
 void LatticeAgreement::handleProposal(Proposal proposal, unsigned long senderId) {
     if (std::includes(proposal.proposedValue.begin(), proposal.proposedValue.end(), acceptedValue_.begin(), acceptedValue_.end())) {
         // accepted_value ⊆ proposed_value
@@ -83,8 +119,6 @@ void LatticeAgreement::handleProposal(Proposal proposal, unsigned long senderId)
     sendNackMsg(nack, senderId);
 }
 
-
-
 void LatticeAgreement::handleAck(unsigned long proposalNumber) {
     if (proposalNumber == activeProposalNumber_){
         ackCount_++;
@@ -102,7 +136,7 @@ void LatticeAgreement::handleNack(Nack nack) {
     }
 }
 
-void LatticeAgreement::triggerNewProposal(){
+void LatticeAgreement::checkIfNeedNewProposal(){
     if (nackCount_ > 0 && ackCount_ + nackCount_ >= majority_ && active_ == true) {
         activeProposalNumber_++;
         ackCount_= 0;
@@ -132,6 +166,17 @@ void LatticeAgreement::tryDecide(){
 
 void LatticeAgreement::decide(std::set<unsigned long> proposedValue) {
     // Log the decision
+    logDecision(proposedValue);
+    
+    // Signal application layer
+    {
+        std::lock_guard<std::mutex> lock(decisionMutex_);
+        decisionReady_ = true;
+    }
+    decisionCv_.notify_one();
+}
+
+void LatticeAgreement::logDecision(std::set<unsigned long> proposedValue) {
     if (!logFile_.is_open()) {
         std::cerr << "Failed to open log file: " << logPath_ << std::endl;
         return;
@@ -153,7 +198,14 @@ void LatticeAgreement::decide(std::set<unsigned long> proposedValue) {
 
         if (++writeCounter_ % linesInLogBatch_ == 0) logFile_.flush(); // every 1000 lines
     }
-    // TODO - maybe give acknowledgement back to main to move onto the next proposal
+}
+
+void LatticeAgreement::waitForDecision() {
+    std::unique_lock<std::mutex> lock(decisionMutex_);
+    decisionCv_.wait(lock, [this]() { return decisionReady_; });
+
+    // Reset for next proposal
+    decisionReady_ = false;
 }
 
 void LatticeAgreement::sendAckMsg(unsigned long proposalNumber, unsigned long receiverId) {
@@ -191,39 +243,6 @@ void LatticeAgreement::sendProposalMsg(Proposal proposal, unsigned long receiver
     unsigned long msgId = ++msgSeqNumber_;
     Message message{myProcessId_, msgId, content};
     perfectLinkInstance_-> sendMessage(message, receiverId);
-}
-
-void LatticeAgreement::receivedMessage(const Message& message, const unsigned long& senderId) {
-    const std::string& content = message.content;
-
-    std::string type = content.substr(0, 3);
-
-    if (type == "PRP") {
-        Proposal proposal;
-        proposal.proposalNumber = parseNumberInParens(content);
-
-        size_t valuesStart = content.find(')') + 1;
-        proposal.proposedValue = parseValueSet(content, valuesStart);
-
-        handleProposal(proposal, senderId);
-    }
-    else if (type == "NAC") {
-        Nack nack;
-        nack.proposalNumber = parseNumberInParens(content);
-
-        size_t valuesStart = content.find(')') + 1;
-        nack.proposedValue = parseValueSet(content, valuesStart);
-
-        handleNack(nack);
-    }
-    else if (type == "ACK") {
-        unsigned long proposalNumber = parseNumberInParens(content);
-
-        handleAck(proposalNumber);
-    }
-    else {
-        throw std::runtime_error("Unknown message type: " + type);
-    }
 }
 
 unsigned long LatticeAgreement::parseNumberInParens(const std::string& content) {
