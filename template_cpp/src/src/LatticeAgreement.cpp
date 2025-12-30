@@ -21,17 +21,8 @@ LatticeAgreement::LatticeAgreement(unsigned long myProcessId, in_addr_t myProces
         std::cerr << "Failed to create log file at: " << logPath_ << std::endl;
         return;
     }
-    
-    // Proposer initialisation
-    active_ = false;
-    ackCount_ = 0;
-    nackCount_ = 0;
-    activeProposalNumber_ = 0;
-    proposedValue_ = {};
-    majority_ = hostMapByPort.size()/2 + 1;
 
-    // Accepter initialisation
-    acceptedValue_ = {};
+    majority_ = hostMapByPort.size()/2 + 1;
 
     // Message vars
     msgSeqNumber_ = 0;
@@ -51,17 +42,17 @@ LatticeAgreement::~LatticeAgreement() {
     stop();
 }
 
-void LatticeAgreement::propose(std::set<unsigned long> proposal) {
-    // Reset acceptor state for new instance:
-    acceptedValue_ = {};
+void LatticeAgreement::propose(std::set<unsigned long> proposal, unsigned long shotNumber) {
+    auto &s = shots_[shotNumber];
 
-    proposedValue_ = proposal;
-    active_ = true;
-    activeProposalNumber_++;
-    ackCount_ = 0;
-    nackCount_ = 0;
+    s.active = true;
+    s.proposalNumber++;
+    s.ackCount = 0;
+    s.nackCount = 0;
+    s.proposedValue = proposal;
+    s.acceptedValue = {};
 
-    Proposal prop{activeProposalNumber_, proposedValue_};
+    Proposal prop{shotNumber, s.proposalNumber, s.proposedValue};
 
     // Trigger beb.broadcast of the proposal
     broadcastProposal(prop);
@@ -71,9 +62,16 @@ void LatticeAgreement::receivedMessage(const Message& message, const unsigned lo
     const std::string& content = message.content;
 
     std::string type = content.substr(0, 3);
+    unsigned long shotNumber = parseNumberInBrackets(content);
+
+    auto &s = shots_[shotNumber];
+    if (s.decided) { // Already been decided so don't do anything
+        return;
+    }
 
     if (type == "PRP") {
         Proposal proposal;
+        proposal.shotNumber = shotNumber;
         proposal.proposalNumber = parseNumberInParens(content);
 
         size_t valuesStart = content.find(')') + 1;
@@ -83,6 +81,7 @@ void LatticeAgreement::receivedMessage(const Message& message, const unsigned lo
     }
     else if (type == "NAC") {
         Nack nack;
+        nack.shotNumber = shotNumber;
         nack.proposalNumber = parseNumberInParens(content);
 
         size_t valuesStart = content.find(')') + 1;
@@ -91,61 +90,64 @@ void LatticeAgreement::receivedMessage(const Message& message, const unsigned lo
         handleNack(nack);
     }
     else if (type == "ACK") {
-        unsigned long proposalNumber = parseNumberInParens(content);
+        Ack ack;
+        ack.shotNumber = shotNumber;
+        ack.proposalNumber = parseNumberInParens(content);
 
-        handleAck(proposalNumber);
+        handleAck(ack);
     }
     else {
         throw std::runtime_error("Unknown message type: " + type);
     }
 
-    tryDecide();
-    checkIfNeedNewProposal();
+    tryDecide(shotNumber);
+    checkIfNeedNewProposal(shotNumber);
 }
 
 void LatticeAgreement::handleProposal(Proposal proposal, unsigned long senderId) {
-    if (std::includes(proposal.proposedValue.begin(), proposal.proposedValue.end(), acceptedValue_.begin(), acceptedValue_.end())) {
+    auto &s = shots_[proposal.shotNumber];
+
+    if (std::includes(proposal.proposedValue.begin(), proposal.proposedValue.end(), s.acceptedValue.begin(), s.acceptedValue.end())) {
         // accepted_value ⊆ proposed_value
-        acceptedValue_ = proposal.proposedValue; 
-        sendAckMsg(proposal.proposalNumber, senderId);
+        s.acceptedValue = proposal.proposedValue; 
+        Ack ack{proposal.shotNumber, proposal.proposalNumber};
+        sendAckMsg(ack, senderId);
         return;
     } 
     
     // accepted_value !⊆ proposed_value
     // Update accepted with union of the two
-    auto result = acceptedValue_;
-    result.insert(proposal.proposedValue.begin(), proposal.proposedValue.end());
-    acceptedValue_ = result;
+    s.acceptedValue.insert(proposal.proposedValue.begin(), proposal.proposedValue.end());
 
     // Send Nack for this proposal number
-    Nack nack{proposal.proposalNumber, acceptedValue_};
+    Nack nack{proposal.shotNumber, proposal.proposalNumber, s.acceptedValue};
     sendNackMsg(nack, senderId);
 }
 
-void LatticeAgreement::handleAck(unsigned long proposalNumber) {
-    if (proposalNumber == activeProposalNumber_){
-        ackCount_++;
+void LatticeAgreement::handleAck(Ack ack) {
+    auto &s = shots_[ack.shotNumber];
+    if (ack.proposalNumber == s.proposalNumber) {
+        s.ackCount++;
     }
 }
 
 void LatticeAgreement::handleNack(Nack nack) {
-    if (nack.proposalNumber == activeProposalNumber_){
-        // Do the union of the nack proposed value and your current proposed value
-        auto result = proposedValue_;
-        result.insert(nack.proposedValue.begin(), nack.proposedValue.end());
-        proposedValue_ = result;
-        
-        nackCount_++;
+    auto &s = shots_[nack.shotNumber];
+    if (nack.proposalNumber == s.proposalNumber) {
+        s.proposedValue.insert(nack.proposedValue.begin(), nack.proposedValue.end());
+        s.nackCount++;
     }
 }
 
-void LatticeAgreement::checkIfNeedNewProposal(){
-    if (nackCount_ > 0 && ackCount_ + nackCount_ >= majority_ && active_ == true) {
-        activeProposalNumber_++;
-        ackCount_= 0;
-        nackCount_ = 0;
+void LatticeAgreement::checkIfNeedNewProposal(unsigned long shotNumber){
+    auto &s = shots_[shotNumber];
+    
+    if (s.nackCount > 0 && s.ackCount + s.nackCount >= majority_ && s.active == true) {
+        s.proposalNumber++;
+        s.ackCount= 0;
+        s.nackCount = 0;
         // Trigger beb.broadcast of the proposal
-        Proposal proposal{activeProposalNumber_, proposedValue_};
+        Proposal proposal{shotNumber, s.proposalNumber, s.proposedValue};
         broadcastProposal(proposal);
     }
 }
@@ -154,31 +156,45 @@ void LatticeAgreement::broadcastProposal(Proposal proposal) {
     for (const auto& entry : hostMapById_) {
         unsigned long processId = entry.first;
 
+        if (processId == myProcessId_) continue;
+
         sendProposalMsg(proposal, processId);
     }
 
-    // Acknowledge your own proposal:
-    ackCount_++;
+    // Deliver proposal to self as acceptor
+    handleProposal(proposal, myProcessId_);
 }
 
-void LatticeAgreement::tryDecide(){
-    if (ackCount_ >= majority_ && active_ == true){
-        decide(proposedValue_);
-        active_ = false;
+void LatticeAgreement::tryDecide(unsigned long shotNumber){
+    auto &s = shots_[shotNumber];
+
+    if (!s.decided && s.ackCount >= majority_) {
+        decide(shotNumber, s.proposedValue);
+        s.decided = true; // Use decided instead of active
     }
 }
 
-void LatticeAgreement::decide(std::set<unsigned long> proposedValue) {
-    // Log the decision
-    logDecision(proposedValue);
-    
-    // Signal application layer
+void LatticeAgreement::decide(unsigned long shotNumber, std::set<unsigned long> proposedValue) {
+    {
+        std::lock_guard<std::mutex> lock(decisionOrderMutex_);
+        decidedValues_[shotNumber] = proposedValue;
+
+        // Try to flush in order
+        while (decidedValues_.count(nextShotToLog_)) {
+            logDecision(decidedValues_[nextShotToLog_]);
+            decidedValues_.erase(nextShotToLog_);
+            nextShotToLog_++;
+        }
+    }
+
+    // Wake application if needed
     {
         std::lock_guard<std::mutex> lock(decisionMutex_);
         decisionReady_ = true;
     }
     decisionCv_.notify_one();
 }
+
 
 void LatticeAgreement::logDecision(std::set<unsigned long> proposedValue) {
     if (!logFile_.is_open()) {
@@ -212,15 +228,15 @@ void LatticeAgreement::waitForDecision() {
     decisionReady_ = false;
 }
 
-void LatticeAgreement::sendAckMsg(unsigned long proposalNumber, unsigned long receiverId) {
-    std::string content = "ACK(" + std::to_string(proposalNumber) + ")";
+void LatticeAgreement::sendAckMsg(Ack ack, unsigned long receiverId) {
+    std::string content = "ACK{" + std::to_string(ack.shotNumber) + "}(" + std::to_string(ack.proposalNumber) + ")";
     unsigned long msgId = ++msgSeqNumber_;
     Message message{myProcessId_, msgId, content};
     perfectLinkInstance_-> sendMessage(message, receiverId);
 }
 
 void LatticeAgreement::sendNackMsg(Nack nack, unsigned long receiverId) {
-    std::string content = "NAC(" + std::to_string(nack.proposalNumber) + ")";
+    std::string content = "NAC{" + std::to_string(nack.shotNumber) + "}(" + std::to_string(nack.proposalNumber) + ")";
     bool first = true;
     for (unsigned long value : nack.proposedValue) {
         if (!first) {
@@ -235,7 +251,7 @@ void LatticeAgreement::sendNackMsg(Nack nack, unsigned long receiverId) {
 }
 
 void LatticeAgreement::sendProposalMsg(Proposal proposal, unsigned long receiverId) {
-    std::string content = "PRP(" + std::to_string(proposal.proposalNumber) + ")";
+    std::string content = "PRP{" + std::to_string(proposal.shotNumber) + "}(" + std::to_string(proposal.proposalNumber) + ")";
     bool first = true;
     for (unsigned long value : proposal.proposedValue) {
         if (!first) {
@@ -259,6 +275,18 @@ unsigned long LatticeAgreement::parseNumberInParens(const std::string& content) 
 
     return std::stoul(content.substr(open + 1, close - open - 1));
 }
+
+unsigned long LatticeAgreement::parseNumberInBrackets(const std::string& content) {
+    size_t open = content.find('{');
+    size_t close = content.find('}');
+
+    if (open == std::string::npos || close == std::string::npos || close <= open) {
+        throw std::runtime_error("Malformed message header");
+    }
+
+    return std::stoul(content.substr(open + 1, close - open - 1));
+}
+
 
 std::set<unsigned long> LatticeAgreement::parseValueSet(const std::string& content, size_t startPos) {
     std::set<unsigned long> values;

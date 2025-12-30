@@ -15,13 +15,19 @@
 
 #include "PerfectLink.hpp"
 
+struct Ack {
+    unsigned long shotNumber;
+    unsigned long proposalNumber;
+};
 
 struct Nack {
+    unsigned long shotNumber;
     unsigned long proposalNumber;
     std::set<unsigned long> proposedValue;
 };
 
 struct Proposal {
+    unsigned long shotNumber;
     unsigned long proposalNumber;
     std::set<unsigned long> proposedValue;
 };
@@ -33,7 +39,7 @@ public:
 
     ~LatticeAgreement();
 
-    void propose(std::set<unsigned long> proposal);
+    void propose(std::set<unsigned long> proposal, unsigned long shotNumber);
 
     // Application-layer wait
     void waitForDecision();
@@ -65,36 +71,47 @@ private:
     size_t writeCounter_ = 0; // To log in batches
     size_t linesInLogBatch_ = 1000;
     size_t linesInLogBatchBroadcast_ = 100;
+    std::map<unsigned long, std::set<unsigned long>> decidedValues_;
+    unsigned long nextShotToLog_ = 1;
+    std::mutex decisionOrderMutex_;
 
     // Concurrency primitives
-    std::mutex stateMutex_;   // protects pendingDelivery_, acknowledged_, delivered_, nextExpectedMsgId_
+    std::mutex shotsMutex_;
     std::mutex loggingMutex_;     // protects logFile_ writes
 
-    // Proposer vars
-    bool active_;
-    unsigned long ackCount_;
-    unsigned long nackCount_;
-    unsigned long activeProposalNumber_;
-    std::set<unsigned long> proposedValue_;
+    struct ShotState {
+        // Proposer
+        bool active = false;
+        unsigned long proposalNumber = 0;
+        unsigned long ackCount = 0;
+        unsigned long nackCount = 0;
+        std::set<unsigned long> proposedValue;
 
-    // Acceptor vars
-    std::set<unsigned long> acceptedValue_;
+        // Acceptor
+        std::set<unsigned long> acceptedValue;
+
+        // Decision
+        bool decided = false;
+    };
+
+    std::unordered_map<unsigned long, ShotState> shots_;
 
     // Functions
     void broadcastProposal(Proposal proposal);
     void handleProposal(Proposal proposal, unsigned long senderId);
-    void handleAck(unsigned long proposalNumber);
+    void handleAck(Ack ack);
     void handleNack(Nack nack);
-    void checkIfNeedNewProposal();
-    void tryDecide();
-    void decide(std::set<unsigned long> proposedValue);
+    void checkIfNeedNewProposal(unsigned long shotNumber);
+    void tryDecide(unsigned long shotNumber);
+    void decide(unsigned long shotNumber, std::set<unsigned long> proposedValue);
     void logDecision(std::set<unsigned long> proposedValue);
-    void sendAckMsg(unsigned long proposalNumber, unsigned long receiverId);
+    void sendAckMsg(Ack ack, unsigned long receiverId);
     void sendNackMsg(Nack nack, unsigned long receiverId);
     void sendProposalMsg(Proposal proposal, unsigned long receiverId);
     void receivedMessage(const Message& message, const unsigned long& senderId);
 
     // Helper functions
     unsigned long parseNumberInParens(const std::string& content);
+    unsigned long parseNumberInBrackets(const std::string& content);
     std::set<unsigned long> parseValueSet(const std::string& content, size_t startPos);
 };
