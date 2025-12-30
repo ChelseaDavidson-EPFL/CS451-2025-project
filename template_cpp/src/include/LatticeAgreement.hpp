@@ -69,7 +69,7 @@ private:
     
     // Logging vars
     size_t writeCounter_ = 0; // To log in batches
-    size_t linesInLogBatch_ = 1000;
+    size_t linesInLogBatch_ = 100; // TODO - change this back to 1000 after debugging
     size_t linesInLogBatchBroadcast_ = 100;
     std::map<unsigned long, std::set<unsigned long>> decidedValues_;
     unsigned long nextShotToLog_ = 1;

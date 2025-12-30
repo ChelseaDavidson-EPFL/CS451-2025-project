@@ -12,6 +12,14 @@
 
 #include "LatticeAgreement.hpp"
 
+// #define DEBUG
+
+#ifdef DEBUG
+    #define DEBUGLOG(msg) (std::cout << msg << std::endl)
+#else
+    #define DEBUGLOG(msg) do {} while(0) // no-op in release
+#endif
+
 LatticeAgreement::LatticeAgreement(unsigned long myProcessId, in_addr_t myProcessIp, unsigned short myProcessPort, std::unordered_map<unsigned short, std::pair<unsigned long, in_addr_t>> hostMapByPort, std::unordered_map<unsigned long, std::pair<in_addr_t, unsigned short>> hostMapById, std::string logPath)
     : myProcessId_(myProcessId), myProcessIp_(myProcessIp), myProcessPort_(myProcessPort),  hostMapByPort_(hostMapByPort), hostMapById_(hostMapById), logPath_(logPath), running_(false)
 {
@@ -45,6 +53,8 @@ LatticeAgreement::~LatticeAgreement() {
 void LatticeAgreement::propose(std::set<unsigned long> proposal, unsigned long shotNumber) {
     auto &s = shots_[shotNumber];
 
+    if (s.decided) return; 
+
     s.active = true;
     s.proposalNumber++;
     s.ackCount = 0;
@@ -65,9 +75,6 @@ void LatticeAgreement::receivedMessage(const Message& message, const unsigned lo
     unsigned long shotNumber = parseNumberInBrackets(content);
 
     auto &s = shots_[shotNumber];
-    if (s.decided) { // Already been decided so don't do anything
-        return;
-    }
 
     if (type == "PRP") {
         Proposal proposal;
@@ -110,8 +117,11 @@ void LatticeAgreement::handleProposal(Proposal proposal, unsigned long senderId)
     if (std::includes(proposal.proposedValue.begin(), proposal.proposedValue.end(), s.acceptedValue.begin(), s.acceptedValue.end())) {
         // accepted_value ⊆ proposed_value
         s.acceptedValue = proposal.proposedValue; 
-        Ack ack{proposal.shotNumber, proposal.proposalNumber};
-        sendAckMsg(ack, senderId);
+        // ONLY send ACK if sender is remote
+        if (senderId != myProcessId_) {
+            Ack ack{proposal.shotNumber, proposal.proposalNumber};
+            sendAckMsg(ack, senderId);
+        }
         return;
     } 
     
@@ -119,13 +129,17 @@ void LatticeAgreement::handleProposal(Proposal proposal, unsigned long senderId)
     // Update accepted with union of the two
     s.acceptedValue.insert(proposal.proposedValue.begin(), proposal.proposedValue.end());
 
-    // Send Nack for this proposal number
-    Nack nack{proposal.shotNumber, proposal.proposalNumber, s.acceptedValue};
-    sendNackMsg(nack, senderId);
+    // Send Nack for this proposal number, only if it is remote
+    if (senderId != myProcessId_) {
+        Nack nack{proposal.shotNumber, proposal.proposalNumber, s.acceptedValue};
+        sendNackMsg(nack, senderId);
+    }
 }
 
 void LatticeAgreement::handleAck(Ack ack) {
     auto &s = shots_[ack.shotNumber];
+    if (s.decided) return;
+
     if (ack.proposalNumber == s.proposalNumber) {
         s.ackCount++;
     }
@@ -133,6 +147,8 @@ void LatticeAgreement::handleAck(Ack ack) {
 
 void LatticeAgreement::handleNack(Nack nack) {
     auto &s = shots_[nack.shotNumber];
+    if (s.decided) return;
+
     if (nack.proposalNumber == s.proposalNumber) {
         s.proposedValue.insert(nack.proposedValue.begin(), nack.proposedValue.end());
         s.nackCount++;
@@ -141,6 +157,8 @@ void LatticeAgreement::handleNack(Nack nack) {
 
 void LatticeAgreement::checkIfNeedNewProposal(unsigned long shotNumber){
     auto &s = shots_[shotNumber];
+
+    if (s.decided) return;
     
     if (s.nackCount > 0 && s.ackCount + s.nackCount >= majority_ && s.active == true) {
         s.proposalNumber++;
@@ -153,29 +171,38 @@ void LatticeAgreement::checkIfNeedNewProposal(unsigned long shotNumber){
 }
 
 void LatticeAgreement::broadcastProposal(Proposal proposal) {
+    // Send to others
     for (const auto& entry : hostMapById_) {
         unsigned long processId = entry.first;
-
         if (processId == myProcessId_) continue;
-
         sendProposalMsg(proposal, processId);
     }
 
-    // Deliver proposal to self as acceptor
+    // === SELF AS ACCEPTOR ===
     handleProposal(proposal, myProcessId_);
+
+    // === SELF AS PROPOSER (ACK) ===
+    auto &s = shots_[proposal.shotNumber];
+    if (!s.decided && proposal.proposalNumber == s.proposalNumber) {
+        s.ackCount++;
+    }
 }
 
 void LatticeAgreement::tryDecide(unsigned long shotNumber){
     auto &s = shots_[shotNumber];
 
+    if (s.decided) return;
+
     if (!s.decided && s.ackCount >= majority_) {
         decide(shotNumber, s.proposedValue);
-        s.decided = true; // Use decided instead of active
+        s.decided = true;
+        s.active = false;
     }
 }
 
 void LatticeAgreement::decide(unsigned long shotNumber, std::set<unsigned long> proposedValue) {
     {
+        DEBUGLOG("Decided for shot " << shotNumber);
         std::lock_guard<std::mutex> lock(decisionOrderMutex_);
         decidedValues_[shotNumber] = proposedValue;
 

@@ -86,8 +86,6 @@ int main(int argc, char **argv) {
     std::set<unsigned long> prop = parser.getProposal(n);
 
     la.propose(prop, n);
-
-    // block until decide() is called
     la.waitForDecision();
   }
 
