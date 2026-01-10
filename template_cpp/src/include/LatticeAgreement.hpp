@@ -61,7 +61,7 @@ private:
     std::unique_ptr<PerfectLink> perfectLinkInstance_;
 
     // Message vars
-    unsigned long msgSeqNumber_;
+    std::atomic<unsigned long> msgSeqNumber_;
 
     // Application level vars
     std::mutex decisionMutex_;

@@ -51,24 +51,30 @@ LatticeAgreement::~LatticeAgreement() {
 }
 
 void LatticeAgreement::propose(std::set<unsigned long> proposal, unsigned long shotNumber) {
-    auto &s = shots_[shotNumber];
+    unsigned long proposalNumber;
+    {
+        std::lock_guard<std::mutex> lk(shotsMutex_);
+        auto &s = shots_[shotNumber];
 
-    if (s.decided) return; 
+        if (s.decided) return; 
 
-    s.active = true;
-    s.proposalNumber++;
-    s.ackCount = 0;
-    s.nackCount = 0;
-    s.proposedValue = proposal;
-    s.acceptedValue = {};
+        s.active = true;
+        s.proposalNumber++;
+        s.ackCount = 0;
+        s.nackCount = 0;
+        s.proposedValue = proposal;
+        s.acceptedValue = {};
 
-    Proposal prop{shotNumber, s.proposalNumber, s.proposedValue};
+        proposalNumber = s.proposalNumber;
+    }
+
+    Proposal prop{shotNumber, proposalNumber, proposal};
 
     // Trigger beb.broadcast of the proposal
-    broadcastProposal(prop);
+    broadcastProposal(prop); // Locks when needed 
 
     // Optimisation: Check if we can decide immediately after broadcast
-    tryDecide(shotNumber);
+    tryDecide(shotNumber); // Locks
 }
 
 void LatticeAgreement::receivedMessage(const Message& message, const unsigned long& senderId) {
@@ -76,8 +82,6 @@ void LatticeAgreement::receivedMessage(const Message& message, const unsigned lo
 
     std::string type = content.substr(0, 3);
     unsigned long shotNumber = parseNumberInBrackets(content);
-
-    auto &s = shots_[shotNumber];
 
     if (type == "PRP") {
         Proposal proposal;
@@ -115,31 +119,45 @@ void LatticeAgreement::receivedMessage(const Message& message, const unsigned lo
 }
 
 void LatticeAgreement::handleProposal(Proposal proposal, unsigned long senderId) {
-    auto &s = shots_[proposal.shotNumber];
+    bool sendAck = false;
+    bool sendNack = false;
+    Ack ack;
+    Nack nack;
 
-    if (std::includes(proposal.proposedValue.begin(), proposal.proposedValue.end(), s.acceptedValue.begin(), s.acceptedValue.end())) {
-        // accepted_value ⊆ proposed_value
-        s.acceptedValue = proposal.proposedValue; 
-        // ONLY send ACK if sender is remote
-        if (senderId != myProcessId_) {
-            Ack ack{proposal.shotNumber, proposal.proposalNumber};
-            sendAckMsg(ack, senderId);
+    {
+        std::lock_guard<std::mutex> lk(shotsMutex_);
+        auto &s = shots_[proposal.shotNumber];
+
+        if (std::includes(proposal.proposedValue.begin(), proposal.proposedValue.end(), s.acceptedValue.begin(), s.acceptedValue.end())) {
+            // accepted_value ⊆ proposed_value
+            s.acceptedValue = proposal.proposedValue;
+            // ONLY send ACK if sender is remote
+            if (senderId != myProcessId_) {
+                ack = Ack{proposal.shotNumber, proposal.proposalNumber};
+                sendAck = true;
+            }
+        } else {
+            // accepted_value !⊆ proposed_value
+            // Update accepted with union of the two
+            s.acceptedValue.insert(proposal.proposedValue.begin(), proposal.proposedValue.end());
+
+            if (senderId != myProcessId_) {
+                nack = Nack{proposal.shotNumber, proposal.proposalNumber, s.acceptedValue};
+                sendNack = true;
+            }
         }
-        return;
-    } 
-    
-    // accepted_value !⊆ proposed_value
-    // Update accepted with union of the two
-    s.acceptedValue.insert(proposal.proposedValue.begin(), proposal.proposedValue.end());
+    } // shotsMutex_ released here
 
-    // Send Nack for this proposal number, only if it is remote
-    if (senderId != myProcessId_) {
-        Nack nack{proposal.shotNumber, proposal.proposalNumber, s.acceptedValue};
+    // Send messages after releasing the lock
+    if (sendAck) {
+        sendAckMsg(ack, senderId);
+    } else if (sendNack) {
         sendNackMsg(nack, senderId);
     }
 }
 
 void LatticeAgreement::handleAck(Ack ack) {
+    std::lock_guard<std::mutex> lk(shotsMutex_);
     auto &s = shots_[ack.shotNumber];
     if (s.decided) return;
 
@@ -149,6 +167,7 @@ void LatticeAgreement::handleAck(Ack ack) {
 }
 
 void LatticeAgreement::handleNack(Nack nack) {
+    std::lock_guard<std::mutex> lk(shotsMutex_);
     auto &s = shots_[nack.shotNumber];
     if (s.decided) return;
 
@@ -159,16 +178,28 @@ void LatticeAgreement::handleNack(Nack nack) {
 }
 
 void LatticeAgreement::checkIfNeedNewProposal(unsigned long shotNumber){
-    auto &s = shots_[shotNumber];
+    unsigned long proposalNumber;
+    std::set<unsigned long> proposedValue;
+    bool shouldBroadcast = false;
 
-    if (s.decided) return;
-    
-    if (s.nackCount > 0 && s.ackCount + s.nackCount >= majority_ && s.active == true) {
-        s.proposalNumber++;
-        s.ackCount= 0;
-        s.nackCount = 0;
-        // Trigger beb.broadcast of the proposal
-        Proposal proposal{shotNumber, s.proposalNumber, s.proposedValue};
+    {
+        std::lock_guard<std::mutex> lk(shotsMutex_);
+        auto &s = shots_[shotNumber];
+
+        if (s.decided) return;
+        
+        if (s.nackCount > 0 && s.ackCount + s.nackCount >= majority_ && s.active == true) {
+            s.proposalNumber++;
+            s.ackCount= 0;
+            s.nackCount = 0;
+            // Trigger beb.broadcast of the proposal
+            shouldBroadcast = true;
+            proposalNumber = s.proposalNumber;
+            proposedValue = s.proposedValue;
+        }
+    }
+    if (shouldBroadcast) {
+        Proposal proposal{shotNumber, proposalNumber, proposedValue};
         broadcastProposal(proposal);
     }
 }
@@ -188,30 +219,42 @@ void LatticeAgreement::broadcastProposal(Proposal proposal) {
     handleProposal(proposal, myProcessId_);
 
     // === SELF AS PROPOSER (ACK) ===
-    auto &s = shots_[proposal.shotNumber];
-    if (!s.decided && proposal.proposalNumber == s.proposalNumber) {
-        s.ackCount++;
+    {
+        std::lock_guard<std::mutex> lk(shotsMutex_);
+        auto &s = shots_[proposal.shotNumber];
+        if (!s.decided && proposal.proposalNumber == s.proposalNumber) {
+            s.ackCount++;
+        }
     }
 }
 
 void LatticeAgreement::tryDecide(unsigned long shotNumber){
-    auto &s = shots_[shotNumber];
+    bool doDecide = false;
+    std::set<unsigned long> value;
+    {
+        std::lock_guard<std::mutex> lk(shotsMutex_);
+        auto &s = shots_[shotNumber];
 
-    if (s.decided) return;
+        if (s.decided) return;
 
-    // Optimisation: If we have all possible distinct elements, we are the top of the lattice - we can therefore decide immediately
-    if (!s.decided && s.proposedValue.size() >= maxDistinctElements_) {
-        decide(shotNumber, s.proposedValue);
-        s.decided = true;
-        s.active = false;
-        return;
+        // Optimisation: If we have all possible distinct elements, we are the top of the lattice - we can therefore decide immediately
+        if (!s.decided && s.proposedValue.size() >= maxDistinctElements_) {
+            doDecide = true;
+            value = s.proposedValue;
+            s.decided = true;
+            s.active = false;
+        }
+
+        else if (!s.decided && s.ackCount >= majority_) {
+            doDecide = true;
+            value = s.proposedValue;
+            s.decided = true;
+            s.active = false;
+        }
     }
-
-    if (!s.decided && s.ackCount >= majority_) {
-        decide(shotNumber, s.proposedValue);
-        s.decided = true;
-        s.active = false;
-    }
+    if (doDecide) {
+        decide(shotNumber, value);
+    }  
 }
 
 void LatticeAgreement::decide(unsigned long shotNumber, std::set<unsigned long> proposedValue) {
