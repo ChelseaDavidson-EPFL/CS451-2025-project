@@ -79,7 +79,7 @@ int main(int argc, char **argv) {
 
   in_addr_t processIp = hostMapById[parser.id()].first;
   unsigned short processPort = hostMapById[parser.id()].second;
-  LatticeAgreement la = LatticeAgreement(parser.id(), processIp, processPort, hostMapByPort, hostMapById, parser.outputPath());
+  LatticeAgreement la = LatticeAgreement(parser.id(), processIp, processPort, hostMapByPort, hostMapById, maxDistinctElements, parser.outputPath());
   g_la = &la; // Have global reference to lattice agreement so that you can call stop() when terminate signals are called
 
   for (unsigned long n = 1; n <= numProposals; ++n) {

@@ -20,8 +20,8 @@
     #define DEBUGLOG(msg) do {} while(0) // no-op in release
 #endif
 
-LatticeAgreement::LatticeAgreement(unsigned long myProcessId, in_addr_t myProcessIp, unsigned short myProcessPort, std::unordered_map<unsigned short, std::pair<unsigned long, in_addr_t>> hostMapByPort, std::unordered_map<unsigned long, std::pair<in_addr_t, unsigned short>> hostMapById, std::string logPath)
-    : myProcessId_(myProcessId), myProcessIp_(myProcessIp), myProcessPort_(myProcessPort),  hostMapByPort_(hostMapByPort), hostMapById_(hostMapById), logPath_(logPath), running_(false)
+LatticeAgreement::LatticeAgreement(unsigned long myProcessId, in_addr_t myProcessIp, unsigned short myProcessPort, std::unordered_map<unsigned short, std::pair<unsigned long, in_addr_t>> hostMapByPort, std::unordered_map<unsigned long, std::pair<in_addr_t, unsigned short>> hostMapById, unsigned long maxDistinctElements, std::string logPath)
+    : myProcessId_(myProcessId), myProcessIp_(myProcessIp), myProcessPort_(myProcessPort),  hostMapByPort_(hostMapByPort), hostMapById_(hostMapById), maxDistinctElements_(maxDistinctElements), logPath_(logPath), running_(false)
 {
     // Create or overwrite the log file
     logFile_.open(logPath_.c_str(), std::ios::out);
@@ -66,6 +66,9 @@ void LatticeAgreement::propose(std::set<unsigned long> proposal, unsigned long s
 
     // Trigger beb.broadcast of the proposal
     broadcastProposal(prop);
+
+    // Optimisation: Check if we can decide immediately after broadcast
+    tryDecide(shotNumber);
 }
 
 void LatticeAgreement::receivedMessage(const Message& message, const unsigned long& senderId) {
@@ -171,11 +174,14 @@ void LatticeAgreement::checkIfNeedNewProposal(unsigned long shotNumber){
 }
 
 void LatticeAgreement::broadcastProposal(Proposal proposal) {
+    // Create proposal message
+    Message msgToSend = createProposalMsg(proposal);
+    
     // Send to others
     for (const auto& entry : hostMapById_) {
         unsigned long processId = entry.first;
         if (processId == myProcessId_) continue;
-        sendProposalMsg(proposal, processId);
+        sendProposalMsg(msgToSend, processId);
     }
 
     // === SELF AS ACCEPTOR ===
@@ -192,6 +198,14 @@ void LatticeAgreement::tryDecide(unsigned long shotNumber){
     auto &s = shots_[shotNumber];
 
     if (s.decided) return;
+
+    // Optimisation: If we have all possible distinct elements, we are the top of the lattice - we can therefore decide immediately
+    if (!s.decided && s.proposedValue.size() >= maxDistinctElements_) {
+        decide(shotNumber, s.proposedValue);
+        s.decided = true;
+        s.active = false;
+        return;
+    }
 
     if (!s.decided && s.ackCount >= majority_) {
         decide(shotNumber, s.proposedValue);
@@ -277,7 +291,7 @@ void LatticeAgreement::sendNackMsg(Nack nack, unsigned long receiverId) {
     perfectLinkInstance_-> sendMessage(message, receiverId);
 }
 
-void LatticeAgreement::sendProposalMsg(Proposal proposal, unsigned long receiverId) {
+Message LatticeAgreement::createProposalMsg(Proposal proposal) {
     std::string content = "PRP{" + std::to_string(proposal.shotNumber) + "}(" + std::to_string(proposal.proposalNumber) + ")";
     bool first = true;
     for (unsigned long value : proposal.proposedValue) {
@@ -289,7 +303,11 @@ void LatticeAgreement::sendProposalMsg(Proposal proposal, unsigned long receiver
     }
     unsigned long msgId = ++msgSeqNumber_;
     Message message{myProcessId_, msgId, content};
-    perfectLinkInstance_-> sendMessage(message, receiverId);
+    return message;
+}
+
+void LatticeAgreement::sendProposalMsg(Message proposalMessage, unsigned long receiverId) {
+    perfectLinkInstance_-> sendMessage(proposalMessage, receiverId);
 }
 
 unsigned long LatticeAgreement::parseNumberInParens(const std::string& content) {
