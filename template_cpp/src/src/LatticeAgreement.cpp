@@ -63,7 +63,7 @@ void LatticeAgreement::propose(std::set<unsigned long> proposal, unsigned long s
         s.ackCount = 0;
         s.nackCount = 0;
         s.proposedValue = proposal;
-        s.acceptedValue = {};
+        // s.acceptedValue = {}; // Might have already acted as an acceptor for another process
 
         proposalNumber = s.proposalNumber;
     }

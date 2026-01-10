@@ -85,10 +85,10 @@ private:
         unsigned long proposalNumber = 0;
         unsigned long ackCount = 0;
         unsigned long nackCount = 0;
-        std::set<unsigned long> proposedValue;
+        std::set<unsigned long> proposedValue = {};
 
         // Acceptor
-        std::set<unsigned long> acceptedValue;
+        std::set<unsigned long> acceptedValue = {};
 
         // Decision
         bool decided = false;
