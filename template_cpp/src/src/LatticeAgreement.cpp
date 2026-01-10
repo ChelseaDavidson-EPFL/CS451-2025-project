@@ -215,10 +215,10 @@ void LatticeAgreement::broadcastProposal(Proposal proposal) {
         sendProposalMsg(msgToSend, processId);
     }
 
-    // === SELF AS ACCEPTOR ===
+    // Treat self as acceptor
     handleProposal(proposal, myProcessId_);
 
-    // === SELF AS PROPOSER (ACK) ===
+    // Treat self as proposer (ack)
     {
         std::lock_guard<std::mutex> lk(shotsMutex_);
         auto &s = shots_[proposal.shotNumber];

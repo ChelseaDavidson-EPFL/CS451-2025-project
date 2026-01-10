@@ -145,8 +145,6 @@ void PerfectLink::addMessageToPacket(const std::string& messagePayload, unsigned
     // Hold partialPacketMutex 
    {
         std::lock_guard<std::mutex> lock(partialPacketMutex_);
-        // TODO - get direct reference to the partialPacket_ at this processId
-
         // Check if it's the first message
         if (partialPacket_[receiverId].empty()) {
             partialPacket_[receiverId] = messagePayload;
@@ -215,12 +213,12 @@ void PerfectLink::flushPendingPacketIfReady(unsigned long receiverId) {
             shouldFlush = !partialPacket_[receiverId].empty();
         }
     } // Releases lock
-    if (shouldFlush) flushMessages(receiverId); // flushMessages does copy-and-call safely
+    if (shouldFlush) flushMessages(receiverId); // flushMessages does copy and call safely
 }
 
 void PerfectLink::flushPendingPacketsIfReady() {
      for (const auto& [processId, _] : hostMapById_) {
-        // Skip it's own process  // TODO - is this correct?
+        // Skip it's own process
         if (processId == myProcessId_) {
             continue;
         }
@@ -233,7 +231,7 @@ void PerfectLink::sendPacketLoop() {
     while (running_) {
         flushPendingPacketsIfReady();
         Packet packetToSend;
-        if (!findPacketToSend(packetToSend)) { // Updating packetToSend with the packet that is ready to be sent // TODO - reuse this logic when parsing ID
+        if (!findPacketToSend(packetToSend)) { // Updating packetToSend with the packet that is ready to be sent
             DEBUGLOGSEND("Packets were sent too recently or pending_ was empty - waiting 10ms");
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
             continue;
@@ -320,7 +318,7 @@ void PerfectLink::receiverLoop() {
         if (payload.rfind("ACK:", 0) == 0) {
             std::string pktIdStr = payload.substr(4);
             unsigned long pktId = parsePacketPayloadId(pktIdStr);
-            if (pktId == 0) { // TODO - add more meaningful error
+            if (pktId == 0) {
                 continue;
             }
             handleAck(senderId, pktId); // "senderId" in this case is the process we SENT a message to and has now acknowledged, so they are technically the receiverId
@@ -355,7 +353,7 @@ void PerfectLink::receiverLoop() {
         }
         
         // Find delivered list for this processId
-        auto& deliveredSet = delivered_[senderId]; // TODO - do I need a mutex lock here?
+        auto& deliveredSet = delivered_[senderId];
     
 
         if (id == firstMissingPacketId) { // The one we've been waiting for so deliver it
@@ -525,7 +523,7 @@ void PerfectLink::logDelivery(unsigned long senderId, unsigned long messageId) {
     
 }
 
-void PerfectLink::logSendPacket(const std::string& packet) { // TODO - probably don't want this anymore or need to adapt it to be for each receiverId
+void PerfectLink::logSendPacket(const std::string& packet) {
     size_t start = 0;
     size_t end;
     while ((end = packet.find('|', start)) != std::string::npos) {

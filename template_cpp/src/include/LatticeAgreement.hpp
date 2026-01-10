@@ -71,7 +71,7 @@ private:
     // Logging vars
     size_t writeCounter_ = 0; // To log in batches
     size_t linesInLogBatch_ = 100; // TODO - change this back to 1000 after debugging
-    std::map<unsigned long, std::set<unsigned long>> decidedValues_; // Only stores max of p elements
+    std::map<unsigned long, std::set<unsigned long>> decidedValues_; // Only stores max of p elements and we erase as we log
     unsigned long nextShotToLog_ = 1;
     std::mutex decisionOrderMutex_;
 
