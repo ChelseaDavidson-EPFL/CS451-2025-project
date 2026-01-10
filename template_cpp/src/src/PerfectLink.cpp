@@ -38,7 +38,6 @@ PerfectLink::PerfectLink(unsigned long myProcessId, in_addr_t myProcessIp, unsig
 {
     // Create or overwrite the log file
     if (logPath_ == "") {
-        std::cout << "Not logging to file" << std::endl;
         loggingToFile_ = false;
     }
     if (loggingToFile_) {
